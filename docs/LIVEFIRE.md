@@ -71,6 +71,15 @@ pre-declared rather than guessed. The task pair that should separate the arms on
 (an interface change vs a new caller — the founding cross-file example) is the next eval; no
 outcome-superiority number is claimed from this run. n=1 per arm; same model both arms.
 
+## Post-fix addendum (same day, after the red-team P0 fixes + hardening landed)
+
+The probe was re-run on the fixed HEAD (fresh server, fresh db): full loop holds — and the run
+incidentally exercised the spec-validation path live (first `declare_plan` rejected with
+`validation` for non-template headings; the session self-corrected and was granted `lm-j05c4u`,
+edited under `allowed|in_plan`, released). The arm-B collision transcripts above predate the P0
+fixes; they ran on the happy path the P0s bracket (canonical paths, symbol claims, per-session
+LOOM_CONFIG), which is why they were unaffected.
+
 ## Environment facts for reruns
 
 `--dangerously-skip-permissions` was never used (it can bypass hooks); `acceptEdits` only. MCP
