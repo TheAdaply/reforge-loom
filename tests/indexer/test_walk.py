@@ -155,6 +155,52 @@ def test_nested_class_and_its_method_are_claimable(graph) -> None:
     assert "AuthService/Session/open" in quals
 
 
+NESTED_SRC = (
+    "class A:\n"
+    "    class B:\n"           # intermediate: body holds ONLY another class
+    "        class C:\n"
+    "            def z(self):\n"
+    "                return 1\n"
+    "\n"
+    "    class Meta:\n"        # method-less nested class (the single-level form)
+    "        ordering = ['id']\n"
+    "\n"
+    "    def m(self):\n"
+    "        return 2\n"
+)
+
+
+def test_intermediate_and_method_less_nested_classes_are_claimable(graph) -> None:
+    """FINDINGS P1-5 / P2-6, closed by the Q_DEFS collapse.
+
+    The three module-anchored queries only ever saw a nested class as a side effect of it
+    directly containing a function, so `B` (body = one class) and `Meta` (body = one
+    assignment) were skipped — and `C` was then minted as `A/C`, a qualname that appears
+    nowhere in the source. `_claimable` is now the only claimability rule.
+    """
+    graph.write("nest.py", NESTED_SRC)
+    graph.reindex()
+    quals = {q for p, q, _k in graph.nodes().values() if p == "nest.py"}
+    assert quals == {"", "A", "A/B", "A/B/C", "A/B/C/z", "A/Meta", "A/m"}
+    assert "A/C" not in quals  # the old, source-less qualname is gone
+    assert ("nest.py::A", "nest.py::A/B") in graph.edges("CONTAINS")
+    assert ("nest.py::A/B", "nest.py::A/B/C") in graph.edges("CONTAINS")
+    assert ("nest.py::A/B/C", "nest.py::A/B/C/z") in graph.edges("CONTAINS")
+
+
+def test_indexer_and_locator_agree_on_nested_qualnames(graph) -> None:
+    """§4's frozen law: the indexer (tree-sitter) and the hook locator (stdlib `ast`) must
+    apply the SAME rule. When they disagreed, an owner who declared the only ref loom
+    offered was denied `out_of_scope` on their own code (P1-5)."""
+    from loom.hook.locator import collect_symbol_spans
+
+    graph.write("nest.py", NESTED_SRC)
+    graph.reindex()
+    indexed = {q for p, q, _k in graph.nodes().values() if p == "nest.py" and q}
+    located = {span[0] for span in collect_symbol_spans(NESTED_SRC)}
+    assert indexed == located
+
+
 def test_hashes_and_spans_are_populated(graph) -> None:
     for r in graph.conn.execute("SELECT * FROM nodes WHERE repo=?", (REPO,)):
         assert len(r["body_hash"]) == 64

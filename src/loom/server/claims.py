@@ -72,8 +72,12 @@ def _conflict(r: sqlite3.Row, kind: str) -> dict[str, Any]:
 
 
 def compose_foreign_claim(owner: dict[str, Any]) -> str:
-    """FOREIGN_CLAIM_TMPL with comments stripped and the whole message capped (§7.4)."""
-    spec = strip_html_comments(_arm(owner["owner_spec_md"])).strip()
+    """FOREIGN_CLAIM_TMPL with comments stripped and the whole message capped (§7.4).
+
+    `owner` comes from `_conflict`, which already applied `_arm` — the arm is enforced once,
+    at the single place an owner dict is minted, so every surface inherits it identically.
+    """
+    spec = strip_html_comments(owner["owner_spec_md"]).strip()
     minutes = max(0, int((owner["owner_expires_ts"] - time.time()) // 60))
     msg = FOREIGN_CLAIM_TMPL.format(**dict(owner, minutes=minutes, owner_spec_md=spec))
     if len(msg) > MAX_DENY_CHARS:
@@ -185,7 +189,8 @@ def expand_write_targets(conn: sqlite3.Connection, repo: str,
 
 
 def _chunks(items: list[str]) -> list[list[str]]:
-    return [items[i:i + _SQL_VARS] for i in range(0, len(items), _SQL_VARS)] or [[]]
+    """Split an id list into IN(...)-sized batches. Both callers guard against empty."""
+    return [items[i:i + _SQL_VARS] for i in range(0, len(items), _SQL_VARS)]
 
 
 def contains_closure(conn: sqlite3.Connection, repo: str, node_ids: set[str],
@@ -202,8 +207,6 @@ def contains_closure(conn: sqlite3.Connection, repo: str, node_ids: set[str],
     while frontier and len(seen) < CLOSURE_MAX_NODES:
         found: set[str] = set()
         for chunk in _chunks(frontier):
-            if not chunk:
-                break
             marks = ",".join("?" * len(chunk))
             if up:
                 found.update(r["id"] for r in conn.execute(

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from loom.cli.main import MATCHERS, _templates, main
+from loom.cli.main import MATCHERS, SNIPPET_MARKER, _templates, main
 from loom.server.db import connect, init_db, iso, now_s
 
 USER_GROUP = {"matcher": "Bash", "hooks": [{"type": "command", "command": "/usr/bin/audit.sh"}]}
@@ -101,6 +101,34 @@ def test_init_writes_config_and_appends_the_protocol_once(
     assert claude_md.startswith("# demo repo\n")
     assert claude_md.count("<!-- loom protocol v1") == 1
     assert "## loom — shared-repo coordination protocol" in claude_md
+
+
+def test_init_does_not_re_append_over_an_older_marker_wording(
+    stub, repo_root, home, fake_gate, monkeypatch
+) -> None:
+    """B9: the marker's prose may be reworded; idempotency keys on `SNIPPET_MARKER` only.
+
+    A repo initialized by an older loom carries the OLD first line. Matching the whole
+    first line would miss it and append a second protocol block on every re-init.
+    """
+    monkeypatch.setenv("HOME", home)
+    old = ("<!-- loom protocol v1 — written by `loom init`; edits here are overwritten "
+           "on re-init -->\n## loom — shared-repo coordination protocol\n")
+    Path(repo_root, "CLAUDE.md").write_text("# demo repo\n\n" + old, encoding="utf-8")
+
+    run_cli(monkeypatch, "init", "--server", stub.url, "--agent", "aria", "--repo-root", repo_root)
+
+    claude_md = Path(repo_root, "CLAUDE.md").read_text(encoding="utf-8")
+    assert claude_md.count(SNIPPET_MARKER) == 1          # no second block appended
+    assert claude_md.count("## loom — shared-repo coordination protocol") == 1
+    assert "overwritten on re-init" in claude_md         # the human's file is left alone
+
+
+def test_the_shipped_marker_starts_with_the_stable_prefix() -> None:
+    """The guard is only stable if the template it guards actually carries the prefix."""
+    with open(os.path.join(_templates(), "CLAUDE.snippet.md"), encoding="utf-8") as fh:
+        first = fh.readline()
+    assert first.startswith(SNIPPET_MARKER)
 
 
 def test_init_refuses_an_unreachable_server(repo_root, home, fake_gate, monkeypatch) -> None:

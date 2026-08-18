@@ -5,7 +5,7 @@ docstring = description, an explicit `-> dict[str, Any]` annotation on every too
 clients silently lose `structured_content`), and errors returned as DATA, never raised.
 Mutating tools own the transaction (`db.immediate`); `check` must NOT be wrapped —
 `claims.gate_decision` manages its own bookkeeping lock (§2 transaction law).
-`state["conn"]` is a zero-arg factory returning THIS thread's long-lived connection: the
+`connection` is a zero-arg factory returning THIS thread's long-lived connection: the
 SDK dispatches sync tools via `anyio.to_thread.run_sync`, so tool bodies run concurrently
 and must not share one connection (see `app.connection_factory`).
 No SQL lives in this module (§1: storage SQL is confined to db.py / claims.py).
@@ -52,10 +52,9 @@ def _needs_resolution(node: str, candidates: list[str]) -> dict[str, Any]:
             "candidates": shown}
 
 
-def register(mcp: MCPServer, state: dict[str, Any]) -> None:
+def register(mcp: MCPServer, connection: Callable[[], sqlite3.Connection],
+             served: str) -> None:
     """Define the §5 tool surface against the server's closed-over state (§5.11)."""
-    connection: Callable[[], sqlite3.Connection] = state["conn"]
-    served: str = state["repo"]
 
     def ok_repo(r: str) -> bool:
         return not r or r == served

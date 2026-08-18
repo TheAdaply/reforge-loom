@@ -1,9 +1,11 @@
-"""BUILD-SPEC §5.11 / §6 — MCPServer construction, `GET /health`, `POST /gate`.
+"""BUILD-SPEC §5.11 / §6 — MCPServer construction and the four plain-HTTP routes:
+`GET /health`, `GET /` + `GET /state` (the dashboard and its poll feed), `POST /gate`.
 
-The nine §5 tools live in `loom.server.tools` and are registered here. State (db path,
-repo, repo_root, the one long-lived connection) is built in `build_server` and closed
-over — no env-var singletons (specgate §3.6). The hook speaks ONLY `POST /gate` on this
-same port, never MCP (§11.14).
+The nine §5 tools live in `loom.server.tools` and are registered here. State (the repo
+salt and the one long-lived connection) is built in `build_server` and closed over — no
+env-var singletons (specgate §3.6). The server never needs `repo_root`: it judges the
+graph, and every path on the wire is already repo-root-relative. The hook speaks ONLY
+`POST /gate` on this same port, never MCP (§11.14).
 """
 
 from __future__ import annotations
@@ -22,28 +24,23 @@ from loom.server.claims import gate_decision
 from loom.server.db import connect, init_db, now_s
 from loom.server.tools import register
 
-# The CLAUDE.snippet protocol text (§8.2), verbatim — free pull-through for agents
-# whose CLAUDE.md drifted (specgate §2.1).
-INSTRUCTIONS = """<!-- loom protocol v1 — written by `loom init`; edits here are overwritten on re-init -->
-## loom — shared-repo coordination protocol
+# `events.actor` holds AGENTS plus these two SYSTEM writers: the indexer (walk.py) and
+# `loom` itself, which owns the TTL sweep's `expired` rows (claims.py `sweep`). Neither is
+# a teammate, so neither may become an agent chip on the dashboard — a swept plan used to
+# grow a permanent phantom "loom" agent. They stay visible in the event feed regardless.
+SYSTEM_ACTORS = ("indexer", "loom")
 
-Before any code change in this repo:
-1. Write a spec from loom's `templates/spec.md` (one page, all five sections, no unfilled brackets).
-2. Resolve every write target and every assume to canonical node IDs with the loom `resolve_nodes`
-   tool. IDs look like `relative/path.py::Class/method`; whole files are `relative/path.ext`.
-3. Call `declare_plan(...)`. If the response carries conflicts, read each embedded spec, replan to
-   build against its DECLARED interfaces — never against in-flight code — adjust your targets, and
-   declare again. Warnings mean someone reads what you write, or you read what they write: honor
-   their spec.
-4. Edit normally. If the loom gate blocks an edit, follow the message: it either hands you the
-   owning plan's spec to build around, or tells you to rescope, or to declare a plan first.
-5. If your work grows beyond the declared targets, call `rescope(plan_id, add_targets, add_assumes)`
-   BEFORE touching the new ground.
-6. When tests pass and the branch merges, call `release(plan_id, agent)`.
 
-Claims expire on a TTL (30 min) and renew automatically while you edit. If `renew` or `check` says
-your plan is gone, re-declare — do not edit around a deny.
-"""
+def _template(name: str) -> str:
+    """Absolute path of a shipped template; the package dir is the only source of truth."""
+    return os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates", name)
+
+
+# The CLAUDE.snippet protocol text (§8.2), read from the ONE file `loom init` also appends
+# to CLAUDE.md — free pull-through for agents whose CLAUDE.md drifted (specgate §2.1).
+# Read once at import: a second copy inlined here is a copy that silently drifts.
+with open(_template("CLAUDE.snippet.md"), encoding="utf-8") as _fh:
+    INSTRUCTIONS = _fh.read()
 
 
 def connection_factory(db_path: str) -> Callable[[], sqlite3.Connection]:
@@ -69,8 +66,10 @@ def connection_factory(db_path: str) -> Callable[[], sqlite3.Connection]:
     return get
 
 
-def build_server(db_path: str, repo: str, repo_root: str) -> MCPServer:
-    """Create the schema if needed, wire the per-thread connection factory and the tools."""
+def build_server(db_path: str, repo: str) -> MCPServer:
+    """Create the schema if needed, wire the per-thread connection factory, the §5 tools,
+    and the four plain-HTTP routes. `repo` and the connection factory are closed over by
+    every route below — they are the whole of the server's state."""
     init_db(db_path)
     conn = connection_factory(db_path)
 
@@ -81,7 +80,7 @@ def build_server(db_path: str, repo: str, repo_root: str) -> MCPServer:
         version="0.1.0",
     )
 
-    register(mcp, {"conn": conn, "repo": repo})
+    register(mcp, conn, repo)
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health_route(request: Request) -> Response:
@@ -91,9 +90,7 @@ def build_server(db_path: str, repo: str, repo_root: str) -> MCPServer:
     @mcp.custom_route("/", methods=["GET"])
     async def dashboard_route(request: Request) -> Response:
         """The one-page read-only dashboard (PLAN §7 'visibility', brought into MVP)."""
-        page = os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                            "templates", "dashboard.html")
-        with open(page, encoding="utf-8") as fh:
+        with open(_template("dashboard.html"), encoding="utf-8") as fh:
             return Response(fh.read(), media_type="text/html")
 
     @mcp.custom_route("/state", methods=["GET"])
@@ -127,16 +124,13 @@ def build_server(db_path: str, repo: str, repo_root: str) -> MCPServer:
                 "ORDER BY rowid DESC LIMIT 50")]
             agents = [p["agent"] for p in plans]
             agents += [e["actor"] for e in reversed(events)
-                       if e["actor"] not in ("indexer",)]
-            seen: dict[str, None] = {}
-            for a in agents:
-                seen.setdefault(a, None)
+                       if e["actor"] not in SYSTEM_ACTORS]
             return JSONResponse({
                 "ok": True, "repo": repo, "now": now,
                 "counts": {"nodes": len(nodes), "edges": len(edges),
                            "plans": len(plans), "claims": len(claims)},
                 "nodes": nodes, "edges": edges, "plans": plans, "claims": claims,
-                "events": events, "agents": list(seen),
+                "events": events, "agents": list(dict.fromkeys(agents)),
             })
         except sqlite3.OperationalError as exc:
             return JSONResponse({"ok": False, "error": type(exc).__name__})
@@ -159,9 +153,9 @@ def build_server(db_path: str, repo: str, repo_root: str) -> MCPServer:
     return mcp
 
 
-def serve(host: str, port: int, db_path: str, repo: str, repo_root: str) -> None:
+def serve(host: str, port: int, db_path: str, repo: str) -> None:
     """Run the streamable-http server; MCP endpoint is `/mcp`."""
-    mcp = build_server(db_path, repo, repo_root)
+    mcp = build_server(db_path, repo)
     mcp.run(transport="streamable-http", host=host, port=port)
 
 
@@ -174,11 +168,16 @@ def main() -> None:
     ap.add_argument("--db", default="")
     args = ap.parse_args()
 
+    # `--repo-root` survives as the DEFAULT source for the two values the server does use.
     repo_root = os.path.abspath(args.repo_root)
     # The repo salt is minted once, here, and echoed to every `loom init` (§11.19).
+    # DELIBERATE DUPLICATE of `cli.main._repo_of`: both spell the same basename rule, and
+    # they must stay in step. NOT shared by import — `loom.server` importing `loom.cli`
+    # would invert the dependency (§9.2 lets the CLI reach into the server, never back),
+    # and this module is spawned directly as `python -m loom.server.app` with no CLI.
     repo = args.repo or os.path.basename(repo_root.rstrip("/")) or "repo"
     db_path = args.db or os.path.join(repo_root, ".loom.sqlite3")
-    serve(args.host, args.port, db_path, repo, repo_root)
+    serve(args.host, args.port, db_path, repo)
 
 
 if __name__ == "__main__":

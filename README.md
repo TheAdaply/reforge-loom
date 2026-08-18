@@ -28,9 +28,12 @@ uv run --directory <this-dir> loom init --server http://<host>:8788 --agent <you
 ```
 
 `init` merges the PreToolUse gate into the repo's `.claude/settings.json` (idempotent, never
-overwrites your other hooks), appends the protocol snippet to `CLAUDE.md`, writes
-`~/.loom/config.toml`, pings the server, and verifies the gate with a synthetic payload. After
-that you never touch loom again — you just talk to your agent.
+overwrites your other hooks), registers the loom server in the repo's `.mcp.json` so your agent
+can actually call the tools the protocol tells it to call, appends the protocol snippet to
+`CLAUDE.md`, writes a **per-repo** `.claude/loom.toml` (with `~/.loom/config.toml` as the
+fallback — so initializing a second repo can never point this one's gate at the wrong server),
+pings the server, and verifies the gate with a synthetic payload. After that you never touch
+loom again — you just talk to your agent.
 
 ## The protocol (what agents do)
 
@@ -43,10 +46,21 @@ that you never touch loom again — you just talk to your agent.
    with the owner's spec in the message; out-of-scope edits are told to `rescope`.
 4. When merged: `release`. Claims also expire on TTL (30 min, renewed implicitly on activity), so
    a crashed agent never freezes the team.
-5. If the server is unreachable, the gate **fails open** in ~1.5s with a loud warning — work
-   continues, coordination degrades, edits are never bricked.
+5. If the server is unreachable — or merely slow — the gate **fails open** with a loud warning:
+   a 1.5s socket timeout, backed by a 2.5s hard wall deadline so that no server can stall an
+   edit by dribbling a response. Work continues, coordination degrades, edits are never bricked.
 
 ## Watching the board
+
+The server's home page is a live one-page dashboard: the code graph drawn as warp threads with
+claim colors, an agent chip per active teammate, plans with their TTLs counting down, and the
+gate's decision feed. Read-only, no build step — it polls `/state`.
+
+```
+http://<host>:8788/
+```
+
+From a shell:
 
 ```bash
 uv run --directory <this-dir> loom ls                 # active claims
@@ -70,7 +84,7 @@ carries an inline assert.
 ## Tests
 
 ```bash
-uv run --directory <this-dir> pytest tests -q     # 217 tests
+uv run --directory <this-dir> pytest tests -q     # 254 tests
 ```
 
 `tests/server/test_concurrency.py` is the one that matters: two HTTP clients race `declare_plan`
@@ -80,7 +94,9 @@ winner's spec.
 ## Design & provenance
 
 - `docs/PLAN-v1.md` — the original plan; `docs/BUILD-SPEC.md` — the frozen implementation
-  contract (DDL, ID scheme, tool shapes, hook contract, deny templates); `docs/extractions/` —
+  contract (DDL, ID scheme, tool shapes, hook contract, deny templates); `docs/FINDINGS.md` —
+  the red-team synthesis: every confirmed defect with its repro, root cause and fix status,
+  what held under attack, and the simplification ledger; `docs/extractions/` —
   what was cherry-picked from beads, FalkorDB code-graph, Serena, spec-kit, mcp_agent_mail
   (patterns only), CodePlan, and grite, with licenses; `THIRD_PARTY_NOTICES.md` — credits.
 - Claims are **advisory with TTL**, never hard locks; write-write blocks, read/write mismatches

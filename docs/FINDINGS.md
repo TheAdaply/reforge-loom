@@ -192,6 +192,15 @@ ID: indexer-F3 · `[GATE-VERIFIED]` · **demo-safe** (conduit has 0 nested class
   this strictly separate from the query-collapse simplification candidate (§4) — that is deferred.**
 - **Regression test**: `tests/indexer/test_walk.py` (qualname == `A/B/C`), plus an
   indexer-vs-locator agreement assertion in `tests/hook/test_locator.py`.
+- **STATUS: FIXED by the final simplification pass, regression
+  `tests/indexer/test_walk.py::test_intermediate_and_method_less_nested_classes_are_claimable`
+  + `::test_indexer_and_locator_agree_on_nested_qualnames`** — fixed NOT by the one-capture
+  patch above but by the §4 candidate-1 query collapse (S1) that supersedes it, which landed
+  under an id-independent before/after dump gate; see "Final simplification pass". The
+  agreement assertion lives in `test_walk.py` (it needs the indexed `graph` fixture) and
+  imports `locator.collect_symbol_spans` rather than sitting in `test_locator.py`.
+  `nested_class_mismatch.py` re-run: both sides now say `A/B/C/z`, and the owner's edit on
+  their own claimed code is `allow in_plan` (was `deny out_of_scope`).
 
 ### P2-1 · No total wall-clock deadline — a slow-drip server stalls every edit for as long as it likes
 ID: gate-F4 · `[GATE-VERIFIED]`.
@@ -269,6 +278,10 @@ P1-5 (`walk.py:69-100`), single-level form (`class Meta:`/`class Config:`). §4 
 as claimable; `resolve_nodes("Meta")` returns nothing so a spec naming it fails `declare_plan` as
 `unresolved`. **Fixed by the same P1-5 change** (unanchored class capture). Regression test:
 `tests/indexer/test_walk.py`.
+**STATUS: FIXED with P1-5 by the final simplification pass (S1)**, regression
+`tests/indexer/test_walk.py::test_intermediate_and_method_less_nested_classes_are_claimable` —
+re-indexing `redteam/indexer/repoA` adds exactly one node, `nested.py::Outer/Meta`, plus its
+CONTAINS edge, and nothing else moves.
 
 ### P3 tail (`[AUTHOR-PROVEN]`; captured output on file, not gate-re-run)
 
@@ -358,6 +371,12 @@ before returning, or accept it as local-only and downgrade §7.4's wording. Reg.
 
 ## 4. SIMPLIFICATION CANDIDATES (identify-only — NO edits; deferred until after live-fire by orchestrator order)
 
+> **EXECUTED.** This section is the identification pass and is kept verbatim as the record of
+> what was proposed. What actually shipped — including which of these were rejected and why —
+> is in "Final simplification pass" at the end of this document. Candidate 1 shipped as S1,
+> candidate 3 had already shipped as `cli.main._index`, and candidate 2 is now S5 (the
+> `state` dict it describes had since shrunk to `{"conn","repo"}`, and S3 removed it entirely).
+
 1. **Collapse the three anchored tree-sitter capture queries into one unanchored def/class capture
    governed by `_claimable`.** `python.py:14-34` defines `_QUERY_TOP_LEVEL_FUNC` /
    `_QUERY_TOP_LEVEL_CLASS` / `_QUERY_CLASS_METHODS`, all module-anchored, but `walk.py:59-66`
@@ -386,6 +405,94 @@ and `MAX_DENY_CHARS` (`claims.py:28`) vs the §11.18 10k figure is an over-conse
 dead code — leave until firstcontact-A's byte/char cap is settled.
 
 ---
+
+## Final simplification pass
+
+Run against `b640b46` (249 tests green, clean tree), applying §4's candidates plus the
+staleness/duplication tail found while re-reading the tree. **Rule: the full suite
+(`pytest tests -q`) had to stay green after EVERY candidate**, with a cumulative
+`accepted.patch` checkpoint after each — `app.py` is touched by seven of them, so a
+per-file revert would have destroyed earlier accepted work. Final: **254 passed**
+(249 baseline + 5 new regression tests). `src/` moves **+90 / -93** across 7 files — a net
+shrink despite the added explanatory comments, because the deleted code outweighs them;
+`tests/` gains **+109 / -5** across 5 files, almost all of it the new regression coverage.
+
+### APPLIED (20 candidates, 19 rows — A1/A2 share one)
+
+| # | Candidate | What changed | Why it is safe |
+|---|---|---|---|
+| S1 | tree-sitter query collapse | `_QUERY_TOP_LEVEL_FUNC` + `_QUERY_TOP_LEVEL_CLASS` + `_QUERY_CLASS_METHODS` -> one unanchored `Q_DEFS`; `_entities` loses its three-query/two-capture-key loop | See the dedicated gate below — **also closes P1-5 and P2-6** |
+| S2 | `INSTRUCTIONS` duplication (= C11) | the §8.2 protocol text is now READ from `templates/CLAUDE.snippet.md` instead of being a second inline copy; added `_template()`, which the dashboard route reuses | the two texts were byte-identical; same file `loom init` already reads at runtime, so no new packaging requirement |
+| S3 | `register(mcp, state)` | -> `register(mcp, connection, served)`; the `state` dict had exactly two readers | one call site; the dict was pure indirection |
+| S4 | dead `walk.index_file` | deleted | zero callers, zero test imports (`Resolver.index_file` is a different method) |
+| S5 | unused `repo_root` | dropped from `build_server`/`serve`; `--repo-root` stays as the default source for `repo` and `db_path` | grep-confirmed unread; 4 call sites updated incl. 2 tests |
+| S6 | `_chunks` `or [[]]` + dead guard | both removed | both callers already guarantee a non-empty list (`while frontier`, `if not wanted: return []`) |
+| S7 | double `_arm()` | dropped the second application inside `compose_foreign_claim` | `_conflict` mints every owner dict and arms there; `test_claims_only_arm_blanks_the_spec` still passes through that path |
+| S8 | `/state` ordered dedupe | hand-rolled `seen` dict -> `list(dict.fromkeys(agents))` | identical ordered-dedupe semantics |
+| B7 | `app.py` module docstring | listed only `/health` and `/gate`; now names all four plain-HTTP routes | doc only |
+| B8 | `build_server` docstring | now says it also mounts the routes, and names the closed-over state | doc only |
+| B9 | CLAUDE.snippet marker | marker claimed "edits here are overwritten on re-init"; `_append_snippet` has never overwritten anything — it appends only when the marker is absent. Text corrected, and the idempotency check moved from an exact-first-line match to the `SNIPPET_MARKER = "<!-- loom protocol v1"` **stable prefix** | the naive text-only fix regresses idempotency: a repo carrying the OLD first line would get a SECOND protocol block on every re-init. Regression: `test_cli.py::test_init_does_not_re_append_over_an_older_marker_wording` + `::test_the_shipped_marker_starts_with_the_stable_prefix` |
+| B10 | duplicated repo-salt rule | comments only, both sides | `server.app` importing `cli._repo_of` would invert the §9.2 dependency direction, and `app` is spawned as `python -m loom.server.app` with no CLI |
+| C13 | `_ref` duplication | pointer comment; code kept | `cli._ref` takes a ROW and tolerates the NULLs that `ls`/`show`'s LEFT JOINs produce for claims orphaned by a re-index (indexer-F5); `ids.node_ref(None, None)` would print "None" |
+| E22 | **real bug** — `/state` grew a phantom `loom` agent chip | new `SYSTEM_ACTORS = ("indexer", "loom")` filters the agent-chip list in the state route | `sweep` logs its `expired` rows as actor `loom`; the chip filter excluded only `indexer`, so the first TTL sweep put a permanent teammate named "loom" on the dashboard. Fixed in the ROUTE, not the event actor — the audit trail must keep saying who expired the plan, and the gate feed still shows the row. Regression: `test_dashboard.py::test_a_ttl_sweep_does_not_grow_a_system_actor_chip` (asserts the chip is gone AND the event is still on the feed) |
+| A1/A2 | README `init` | it also registers the server in `.mcp.json`, and writes a per-repo `.claude/loom.toml` (global config is the fallback, post P0-3) | doc only |
+| A4 | README "Watching the board" | the one-page dashboard at `/` was missing entirely | doc only |
+| A5 | README fail-open timing | "~1.5s" was the socket timeout only; there is now also a 2.5s hard wall deadline (gate-F4) | doc only |
+| A6 | README provenance | `docs/FINDINGS.md` was unlisted | doc only |
+| A3 | README test count | 217 -> **254**, taken from the final run | doc only |
+
+### S1's extra gate (id-INDEPENDENT dumps + red-team re-run)
+
+Node ids are a hash of `(repo, path, qualname)`, so a qualname change moves the id — the
+diffs below are over `(path, qualname, kind)` and over edges joined to `path::qualname`,
+never ids. The control is a **pre-S1 package copy** (`git show HEAD:` for the two changed
+files) run over the same repos, so incremental-index staleness in the stored red-team
+`.db` artifacts cannot be mistaken for an S1 effect.
+
+- `tests/fixtures/pyrepo` (full index): **byte-identical** before/after — 32 nodes, 51
+  edges, zero drift. Its nested class `AuthService/Session` has a method, so the old
+  anchored queries already found it.
+- `redteam/indexer/repoB` (P1-5 repro): `deep.py::A/C` + `A/C/z` -> `A/B` + `A/B/C` +
+  `A/B/C/z`, with the CONTAINS chain following. **By design**: the source is
+  `class A: class B: class C: def z`, so the old `A/C` named nothing that exists.
+- `redteam/indexer/repoA` (P2-6 repro): **+1** node `nested.py::Outer/Meta` (a nested class
+  with no methods of its own) and its one CONTAINS edge. **By design.**
+- **No CALLS or IMPORTS edge changed anywhere**, and no call site was re-attributed.
+- Two edges (`c.py IMPORTS shadow/logging.py`, `c.py::boot CALLS shadow/logging.py::getLogger`)
+  appear when diffing against the stored `a.db` but are present in BOTH arms of the
+  controlled full-index comparison — they are the documented incremental caveat
+  (`coordination_effects.py` rewrites `shadow/logging.py` and re-indexes `changed_only=True`,
+  which drops inbound edges from unchanged files), **not** an S1 effect. This is
+  unproven-suspicion 1 reproducing, and it is unchanged by this pass.
+- `nested_class_mismatch.py` re-run: locator and indexer now return the **same** list
+  `['A', 'A/B', 'A/B/C', 'A/B/C/z']`, and the owner's edit on their own claimed code is
+  `allow in_plan` — it was `deny out_of_scope`.
+- `robustness.py` re-run: malformed / latin-1 / zero-byte files still index without
+  exception; the `[i]` duplicate counter (`twinclass.py::A`, `A[1]`) is unchanged.
+
+Because S1 closes two findings, it ships with their named regression tests:
+`test_walk.py::test_intermediate_and_method_less_nested_classes_are_claimable` and
+`::test_indexer_and_locator_agree_on_nested_qualnames`. **P1-5 and P2-6 above are therefore
+FIXED by this pass** — §4 candidate 1 said the one-capture P1-5 patch should land first and
+be superseded by this collapse; the collapse landed directly, under the gate above.
+
+### REJECTED / NOT APPLIED (6 ledger rows)
+
+| # | Candidate | Verdict |
+|---|---|---|
+| S9 | `cmd_release` -> `claims.release` | **REJECTED** — the CLI module docstring documents the SQL duplication as deliberate, to keep cross-module imports inside §9.2's allowance. Reversing a documented architecture decision is an orchestrator call, not an applier's. |
+| S10a/b | spec-mandated dead code in `eval/metrics.py` | **SKIPPED** — the candidate text itself requires orchestrator sign-off. |
+| C12 | test server-boot fixture consolidation | **DEFERRED** — largest test-side churn of any candidate, no user-visible value, and it would multiply the subprocess-server surface in a finishing pass. |
+| D14-D21 | BUILD-SPEC stale-side items | **REPORT ONLY** by reviewer order (the spec is frozen). |
+| E23 | annotate the unused `repo_root` | **SUPERSEDED** by S5, which removes the parameter instead of documenting it. |
+| E24 | `counts.nodes/edges` report post-LIMIT values | **SKIPPED** — reviewer's bar was "fix if ever surfaced"; it has not surfaced. |
+
+**Not touched, by standing order**: §7.4 deny templates, the §5/§6 wire shapes, and the DDL.
+P2-1/P2-2/P2-3/P2-4 and the P3 tail remain open — this was a simplification pass, and E22 was
+the one defect it was chartered to fix.
+
+---
 _Provenance: `scratchpad/redteam/{findings-gate,findings-claimsx,findings-indexer,findings-xm}.md`,
 `verified.md`, and `firstcontact/attack{1,2,3}.out`. Spec references are to
-`loom/docs/BUILD-SPEC.md`. No file under `loom/src` or `loom/tests` was modified by this pass._
+`loom/docs/BUILD-SPEC.md`. The red-team synthesis above modified no file under `loom/src` or
+`loom/tests`; the final simplification pass, recorded in its own section, did._

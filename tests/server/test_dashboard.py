@@ -12,8 +12,8 @@ from collections.abc import Iterator
 
 import pytest
 
-from loom.server.claims import declare_plan
-from loom.server.db import connect, immediate, now_s
+from loom.server.claims import SWEEP_GRACE_S, declare_plan, sweep
+from loom.server.db import connect, immediate, iso, now_s
 
 SPEC = """# Spec: Dashboard test plan
 
@@ -99,3 +99,33 @@ def test_state_shape_and_claims(live_server):
     assert row["id"] in claimed  # the declared target is visibly claimed
     assert "dash-agent" in state["agents"]
     assert any(e["action"] == "declared" for e in state["events"])
+
+
+def test_a_ttl_sweep_does_not_grow_a_system_actor_chip(live_server):
+    """E22: `sweep` logs its `expired` rows as the SYSTEM actor `loom` (claims.py), and the
+    agent-chip list was built from every event actor except `indexer`. So the first TTL
+    sweep made a phantom teammate named "loom" appear on the dashboard forever.
+
+    The event itself must stay visible — the gate feed is how a human sees expiries — it is
+    only the *agent chips* that must exclude system actors.
+    """
+    base, db = live_server
+    conn = connect(db)
+    now = now_s()
+    # declare_plan cannot mint an already-expired plan; seed the row the sweep will find.
+    with immediate(conn):
+        conn.execute(
+            "INSERT INTO plans (id,agent,repo,branch,title,spec_md,status,created,updated,"
+            "ttl_expires) VALUES (?,?,?,?,?,?,'active',?,?,?)",
+            ("lm-stale1", "ghost-agent", "demo", "", "stale plan", SPEC,
+             iso(now), iso(now), now - SWEEP_GRACE_S - 100))
+        swept = sweep(conn, "demo", now)
+    assert swept == ["lm-stale1"], swept
+    conn.close()
+
+    state = json.loads(_get(base + "/state")[1])
+    assert state["ok"] is True
+    assert "loom" not in state["agents"], f"system actor leaked into the chips: {state['agents']}"
+    assert "indexer" not in state["agents"]
+    # ... while the audit trail of the sweep is still on the feed.
+    assert any(e["action"] == "expired" and e["actor"] == "loom" for e in state["events"])

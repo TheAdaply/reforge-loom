@@ -19,7 +19,7 @@ from typing import Any
 from tree_sitter import Parser
 
 from loom.indexer.naming import norm_path, qualname as join_qualname
-from loom.indexer.queries.python import LANGUAGE, Q_CLASS, Q_FUNC, Q_METHODS, Resolver, matches
+from loom.indexer.queries.python import LANGUAGE, Q_DEFS, Resolver, matches
 from loom.server.db import iso, log_event, now_s
 from loom.server.ids import node_id
 
@@ -69,17 +69,16 @@ def _claimable(node: Any) -> bool:
 def _entities(root: Any) -> list[tuple[str, str, Any]]:
     """`(qualname, kind, ts_node)` in source order, with §4's `[i]` duplicate counter.
 
-    Captures are taken via `@name`.parent, which unwraps `decorated_definition` to the
-    inner definition for name and span (falkordb §2.8). `_QUERY_CLASS_METHODS` is
-    unanchored, so `@class_name`.parent is how classes nested in classes are discovered;
-    `_claimable` — not the query text — is the claimability rule.
+    `Q_DEFS` captures EVERY def/class in the file; `_claimable` — not the query text — is
+    the claimability rule, so every candidate is judged by one predicate and intermediate
+    classes can no longer be skipped (FINDINGS P1-5/P2-6). Captures are taken via
+    `@name`.parent, which unwraps `decorated_definition` to the inner definition for name
+    and span (falkordb §2.8).
     """
     found: dict[int, Any] = {}
-    for q, keys in ((Q_FUNC, ("name",)), (Q_CLASS, ("name",)), (Q_METHODS, ("class_name", "method_name"))):
-        for _, caps in matches(q, root):
-            for key in keys:
-                for n in caps.get(key, ()):
-                    found[n.parent.id] = n.parent
+    for _, caps in matches(Q_DEFS, root):
+        for n in caps.get("name", ()):
+            found[n.parent.id] = n.parent
     out: list[tuple[str, str, Any]] = []
     assigned: dict[int, str] = {}  # ts node id -> assigned qualname (parents come first)
     counts: dict[str, int] = {}
@@ -138,11 +137,6 @@ def _index_tree(conn, repo: str, rel: str, src: bytes, tree: Any) -> list[tuple[
         _edge(conn, owner, nid, "CONTAINS")  # src = container (File|Class), dst = contained
         ents.append((q, kind, n.start_byte, n.end_byte))
     return ents
-
-
-def index_file(conn, repo: str, repo_root: str, rel_path: str, source: bytes) -> None:
-    """Index one file's nodes and CONTAINS edges (CALLS/IMPORTS need pass 2)."""
-    _index_tree(conn, repo, rel_path, source, _PARSER.parse(source))
 
 
 def index_repo(conn, repo: str, repo_root: str, changed_only: bool = False) -> dict[str, Any]:

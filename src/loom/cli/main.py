@@ -39,6 +39,10 @@ BYPASS_NOTE = ("Human escape hatch: LOOM_BYPASS=1 in your own shell makes the ga
                "process through. Every use is written to ~/.loom/gate-audit.jsonl. Agents are\n"
                "never told this exists — no deny message ever names a way around a claim.")
 ACTIVE = "c.released IS NULL AND p.status = 'active' AND p.ttl_expires > ?"
+# The STABLE part of the snippet's marker comment — everything after it is prose that may
+# be reworded. `_append_snippet` matches on this prefix, never on the whole first line, so
+# rewording the marker cannot make init re-append the block to an already-initialized repo.
+SNIPPET_MARKER = "<!-- loom protocol v1"
 
 
 def _die(msg: str, as_json: bool = False) -> None:
@@ -54,6 +58,7 @@ def _no_empty(args: argparse.Namespace, *flags: str) -> None:
 
 
 def _repo_of(repo_root: str) -> str:
+    # Same rule as `server.app.main` — see the note there on why it is not shared.
     return os.path.basename(repo_root.rstrip("/")) or "repo"
 
 
@@ -75,6 +80,10 @@ def _templates() -> str:
 
 
 def _ref(row) -> str:
+    # Same display form as `server.ids.node_ref`, KEPT SEPARATE on purpose: this one takes a
+    # ROW and tolerates NULLs. `ls`/`show` LEFT JOIN `nodes`, so a claim whose node was
+    # dropped by a re-index (FINDINGS indexer-F5) arrives with path/qualname NULL, where
+    # `node_ref(None, None)` would return None and print "None". Keep the `or ""`.
     return f"{row['path']}::{row['qualname']}" if row["qualname"] else (row["path"] or "")
 
 
@@ -89,7 +98,7 @@ def cmd_serve(args: argparse.Namespace) -> None:
     stats = _index(db, repo, repo_root, changed_only=None)
     print(f"loom: indexed {json.dumps(stats, default=str)}", flush=True)
     # The repo salt is minted once, here, and echoed to every `loom init` (§11.19).
-    serve(args.host, args.port, db, repo, repo_root)
+    serve(args.host, args.port, db, repo)
 
 
 def _index(db: str, repo: str, repo_root: str, changed_only: bool | None) -> dict:
@@ -154,14 +163,14 @@ def _merge_settings(repo_root: str, gate: str) -> int:
 
 
 def _append_snippet(repo_root: str) -> bool:
-    """Append §8.2 to the repo CLAUDE.md, idempotent on the protocol marker comment."""
+    """Append §8.2 to the repo CLAUDE.md, idempotent on `SNIPPET_MARKER`."""
     with open(os.path.join(_templates(), "CLAUDE.snippet.md"), encoding="utf-8") as fh:
         snippet = fh.read()
     path, existing = os.path.join(repo_root, "CLAUDE.md"), ""
     if os.path.exists(path):
         with open(path, encoding="utf-8") as fh:
             existing = fh.read()
-        if snippet.splitlines()[0] in existing:
+        if SNIPPET_MARKER in existing:
             return False
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(("\n" if existing and not existing.endswith("\n") else "") + "\n" + snippet)

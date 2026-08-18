@@ -11,26 +11,20 @@ from tree_sitter import Language, Query, QueryCursor
 
 from loom.indexer.naming import NAME_SEP
 
-_QUERY_TOP_LEVEL_FUNC = """
-(module (function_definition name: (identifier) @name) @def)
-(module (decorated_definition
-    definition: (function_definition name: (identifier) @name)) @def)
-"""
-
-_QUERY_TOP_LEVEL_CLASS = """
-(module (class_definition name: (identifier) @name) @def)
-(module (decorated_definition
-    definition: (class_definition name: (identifier) @name)) @def)
-"""
-
-_QUERY_CLASS_METHODS = """
-(class_definition
-    name: (identifier) @class_name
-    body: (block (function_definition name: (identifier) @method_name) @method_def))
-(class_definition
-    name: (identifier) @class_name
-    body: (block (decorated_definition
-        definition: (function_definition name: (identifier) @method_name) @method_def)))
+# EVERY def/class in the file, unanchored and undecorated-agnostic. The ancestor chain is
+# NOT expressed here: `walk._claimable` is §4's single authority on what may be claimed, and
+# it already walks parents to the module root. Three module-anchored queries used to restate
+# that rule in tree-sitter syntax, and the two statements of it disagreed — an intermediate
+# class (`B` in `A->B->C`) whose body holds only another class matched none of them, so it
+# was skipped and `C` was minted as `A/C` while the hook's `ast` locator said `A/B/C`
+# (FINDINGS P1-5, and its method-less single-level form P2-6). One capture, one rule.
+#
+# `@name`.parent is the def/class node in both the plain and the decorated case, because the
+# capture is on the `name:` FIELD — a `decorated_definition` wrapper is never the parent of
+# the name identifier, so the span stays the definition's own (falkordb §2.8).
+_QUERY_DEFS = """
+(function_definition name: (identifier) @name)
+(class_definition name: (identifier) @name)
 """
 
 # Plain ``import x`` / ``import x.y`` / ``import x as y`` / ``import x.y as z``.
@@ -49,10 +43,9 @@ _QUERY_IMPORT_FROM = """
 _QUERY_CALL = "(call) @reference.call"
 
 LANGUAGE = Language(tree_sitter_python.language())
-Q_FUNC, Q_CLASS, Q_METHODS, Q_IMPORT, Q_IMPORT_FROM, Q_CALL = (
+Q_DEFS, Q_IMPORT, Q_IMPORT_FROM, Q_CALL = (
     Query(LANGUAGE, s)
-    for s in (_QUERY_TOP_LEVEL_FUNC, _QUERY_TOP_LEVEL_CLASS, _QUERY_CLASS_METHODS,
-              _QUERY_IMPORT, _QUERY_IMPORT_FROM, _QUERY_CALL)
+    for s in (_QUERY_DEFS, _QUERY_IMPORT, _QUERY_IMPORT_FROM, _QUERY_CALL)
 )
 
 

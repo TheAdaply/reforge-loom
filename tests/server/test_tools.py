@@ -31,7 +31,7 @@ def run(mcp, calls: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
 def server(tmp_path):
     db = str(tmp_path / "loom.sqlite3")
     seed(db)
-    return build_server(db, "demo", str(tmp_path))
+    return build_server(db, "demo")
 
 
 def test_every_tool_is_registered_and_annotated(tmp_path) -> None:

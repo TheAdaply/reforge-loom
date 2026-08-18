@@ -1,4 +1,4 @@
-<!-- loom protocol v1 — written by `loom init`; edits here are overwritten on re-init -->
+<!-- loom protocol v1 — appended by `loom init`. Edit freely: re-init skips this block while this marker line survives, and never rewrites it. -->
 ## loom — shared-repo coordination protocol
 
 Before any code change in this repo:
