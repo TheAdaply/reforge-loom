@@ -126,7 +126,7 @@ carries an inline assert.
 ## Tests
 
 ```bash
-uv run --directory <this-dir> pytest tests -q     # 279 tests
+uv run --directory <this-dir> pytest tests -q     # 298 tests
 ```
 
 `tests/server/test_concurrency.py` is the one that matters: two HTTP clients race `declare_plan`

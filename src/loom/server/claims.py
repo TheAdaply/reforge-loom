@@ -114,9 +114,14 @@ def sweep(conn: sqlite3.Connection, repo: str, now: float) -> list[str]:
 def resolve_query(conn: sqlite3.Connection, repo: str, q: str) -> list[sqlite3.Row]:
     """§5.2 resolution order, first hit wins; returns ALL candidates so callers never guess."""
     path, qual = split_ref(q)
-    steps = [                                            # exact ref -> path -> qualname ->
+    steps = [                                            # exact ref -> path-suffix ref ->
         ("path=? AND qualname=?", (norm_path(path), qual)) if qual else None,
-        ("path=? AND qualname=''", (norm_path(q),)),     # '/'-boundary suffix -> substring.
+        # `auth.py::login` must find `src/api/routes/auth.py::login`: agents are TAUGHT the
+        # path::qualname form, so the path half gets the same '/'-boundary suffix treatment
+        # the qualname half always had (found in the conduit tryout, iteration 2).
+        ("path LIKE '%/' || ? AND qualname=?", (norm_path(path), qual)) if qual else None,
+        ("(path=? OR path LIKE '%/' || ?) AND qualname=''",
+         (norm_path(q), norm_path(q))),                  # file -> qualname suffix -> substring.
         ("(qualname=? OR qualname LIKE '%/' || ?)", (q, q)),
         ("qualname LIKE '%' || ? || '%' AND qualname<>''", (q.rsplit("/", 1)[-1],)),
     ]

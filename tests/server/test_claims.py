@@ -468,3 +468,41 @@ def test_iso_round_trip_is_utc_z() -> None:
 def test_gate_on_an_unknown_ref_never_raises(gconn: sqlite3.Connection, bad: str) -> None:
     d = claims.gate_decision(gconn, repo=REPO, agent="aria", path=bad, qualname=None, now=now_s())
     assert d["decision"] == "allow" and d["case"] == "new_path"
+
+
+class TestPathSuffixResolution:
+    """Iteration-2 tryout fix: the taught `path.py::qualname` form must resolve on DEEP trees
+    (found live on conduit: `auth.py::login` returned zero matches against
+    `src/conduit/api/routes/auth.py::login`)."""
+
+    @staticmethod
+    def _seed_deep(gconn):
+        from loom.server.db import iso, now_s
+        from loom.server.ids import node_id
+        rows = [("src/api/routes/auth.py", ""), ("src/api/routes/auth.py", "login"),
+                ("src/core/security.py", "decode_jwt")]
+        gconn.executemany(
+            "INSERT OR IGNORE INTO nodes (id, repo, path, qualname, kind, updated) "
+            "VALUES (?,?,?,?,?,?)",
+            [(node_id("demo", p, q), "demo", p, q, "function" if q else "file", iso(now_s()))
+             for p, q in rows])
+
+    def test_basename_qualified_ref_resolves_by_path_suffix(self, gconn):
+        from loom.server.claims import resolve_query
+        self._seed_deep(gconn)
+        rows = resolve_query(gconn, "demo", "auth.py::login")
+        assert [(r["path"], r["qualname"]) for r in rows] == [("src/api/routes/auth.py", "login")]
+
+    def test_partial_dir_suffix_also_resolves(self, gconn):
+        from loom.server.claims import resolve_query
+        self._seed_deep(gconn)
+        rows = resolve_query(gconn, "demo", "routes/auth.py::login")
+        assert len(rows) == 1 and rows[0]["path"] == "src/api/routes/auth.py"
+        # non-'/'-boundary fragments must NOT match (outes/auth.py is not a suffix)
+        assert resolve_query(gconn, "demo", "outes/auth.py::login") == []
+
+    def test_bare_file_basename_resolves_file_node(self, gconn):
+        from loom.server.claims import resolve_query
+        self._seed_deep(gconn)
+        rows = resolve_query(gconn, "demo", "auth.py")
+        assert [(r["path"], r["qualname"]) for r in rows] == [("src/api/routes/auth.py", "")]

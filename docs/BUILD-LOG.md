@@ -25,3 +25,14 @@
   behavior. P1-5/P2-6 are thereby CLOSED by S1. Remaining open by charter: P2-1..4, P3 tail.
 - 2026-08-18 TCC incident: Desktop access lost mid-pass (stale per-folder deny overriding FDA);
   fixed live via tccutil reset SystemPolicyDesktopFolder com.apple.Terminal. Zero work lost.
+- 2026-08-18 Iteration 2 complete (a055e8a + 9969a77): opt-in token auth (18/18 live-fire,
+  ambient-canary suite run), /state totals+truncated, fabric focus mode (verified by executing
+  the page JS on real payloads). 298 tests. Mid-iteration: an accidental SendMessage-resume fork
+  of the server coder was detected by the fork itself (clean hold, zero clobber) — the loom
+  founding failure mode, lived inside loom's own build; fork's findings folded into spec §5a.
+  TCC Desktop deny recurred twice more (#2, #3); known one-command fix applied both times.
+- 2026-08-18 Orchestrator tryout fix: resolve_query gains '/'-boundary PATH-suffix matching —
+  agents are taught `path.py::qualname` and on deep trees (conduit) that form resolved to zero.
+  Live-verified: auth.py::login -> src/conduit/api/routes/auth.py::login; declare via suffix refs
+  granted (lm-udebf0). +3 deep-path regression tests incl. negative non-boundary case. 301 tests.
+  Focus-mode before/after screenshots committed (docs/dashboard-conduit-{before,focus}.png).
