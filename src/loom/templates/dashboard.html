@@ -34,11 +34,16 @@
   .live .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--allow); }
   .live.down .dot { background: var(--deny); }
   .chips { display: flex; gap: .6rem; margin-left: auto; flex-wrap: wrap; }
+  .repos { display: flex; gap: .4rem; flex-wrap: wrap; }
   .chip {
     display: inline-flex; align-items: center; gap: .45em; font-family: var(--mono);
     font-size: .82rem; padding: .2em .65em; border: 1px solid var(--line);
     border-radius: 999px; background: var(--card);
   }
+  /* The repo switcher: the same chip, made pressable. Active is ink-on-paper — the two
+     colors the page already commits to — so a second repo adds no new color. */
+  .repos .chip { color: var(--ink-2); cursor: pointer; line-height: inherit; }
+  .repos .chip[aria-pressed="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
   .chip .swatch { width: 9px; height: 9px; border-radius: 50%; }
   main {
     display: grid; grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr);
@@ -104,6 +109,7 @@
 <header>
   <span class="wordmark">loom</span>
   <span class="repo" id="repoName">—</span>
+  <span class="repos" id="repos" role="group" aria-label="repositories"></span>
   <span class="live" id="live"><span class="dot"></span><span id="liveText">connecting</span></span>
   <span class="chips" id="chips" aria-label="agents"></span>
 </header>
@@ -207,8 +213,18 @@ function fabricSVG(state) {
   return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="code graph with live claims">${edges}${threads}${beads}</svg>`;
 }
 
+function renderRepos(state) {
+  // One repo (the single-repo server, and every server before multi-repo) renders NOTHING:
+  // the switcher must not change today's header for the team that has one repository.
+  const repos = state.repos || [];
+  el("repos").innerHTML = repos.length > 1 ? repos.map(r =>
+    `<button type="button" class="chip" data-repo="${esc(r)}" aria-pressed="${r === state.repo}">${esc(r)}</button>`
+  ).join("") : "";
+}
+
 function render(state) {
   el("repoName").textContent = state.repo;
+  renderRepos(state);
   el("liveText").textContent = "live";
   el("live").classList.remove("down");
   el("banner").style.display = "none";
@@ -247,10 +263,20 @@ document.addEventListener("mousemove", ev => {
   } else tip.style.display = "none";
 });
 
+// "" means "whatever the server calls its first repo" — the URL stays plain `/state`
+// until a human picks a repo, so a one-repo server never sees a `?repo=` it must fall back on.
+let selectedRepo = "";
+el("repos").addEventListener("click", ev => {
+  const chip = ev.target.closest("[data-repo]");
+  if (!chip) return;
+  selectedRepo = chip.dataset.repo;
+  poll();                                                   // re-poll now, don't wait 2s
+});
+
 async function poll() {
   if (document.hidden) return;
   try {
-    const r = await fetch("/state");
+    const r = await fetch(selectedRepo ? "/state?repo=" + encodeURIComponent(selectedRepo) : "/state");
     const s = await r.json();
     if (s.ok) render(s);
     else throw new Error(s.error || "not ok");

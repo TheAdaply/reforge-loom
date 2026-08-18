@@ -1,7 +1,8 @@
 """M3 — the loom CLI (BUILD-SPEC §9.1) and the §7.5 registration contract.
 
-Verbs: serve · init · index · ls · show · release. ls/show/release are LOCAL-DB admin verbs
-(agents use the MCP tools; remote CLI is v2). beads §2.3 conventions: an empty value on a
+Verbs: serve · init · doctor · index · ls · show · release. ls/show/release are LOCAL-DB
+admin verbs (agents use the MCP tools; remote CLI is v2). `doctor` is MULTIREPO-SPEC §4.
+beads §2.3 conventions: an empty value on a
 narrowing flag is a hard error, never a wildcard; agent mode (`CLAUDE_CODE` /
 `LOOM_AGENT_MODE=1`) prints one line per row, no color; `--json` errors are JSON; truncation
 notices reach stderr only when it is a tty. Cross-module imports stay inside §9.2's allowance
@@ -16,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 
 from loom.server.db import connect, immediate, init_db, iso, log_event, now_s
@@ -137,19 +139,27 @@ def cmd_index(args: argparse.Namespace) -> None:
     print(json.dumps({"repo": repo, **stats}, default=str))
 
 
-def _health(server: str) -> list[str]:
-    """Ping `GET /health` for the served repo salts — one spelling, minted at serve (§11.19).
+def _get_json(url: str, timeout: float) -> dict:
+    """GET one JSON document; raises on timeout, non-2xx and malformed bodies alike."""
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
-    Reads the multi-repo `repos` list, falling back to the single `repo` key so a checkout
-    initialized against an OLDER server (or any of the frozen test stubs) still works.
-    """
+
+def _served(data: dict) -> list[str]:
+    """The repo salts a `/health` body names: the multi-repo `repos` list, falling back to
+    the single `repo` key so a checkout initialized against an OLDER server (or any of the
+    frozen test stubs) still works."""
+    return [str(r) for r in (data.get("repos") or [])] or \
+        ([str(data["repo"])] if data.get("repo") else [])
+
+
+def _health(server: str) -> list[str]:
+    """Ping `GET /health` for the served repo salts — one spelling, minted at serve (§11.19)."""
     try:
-        with urllib.request.urlopen(server.rstrip("/") + "/health", timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        data = _get_json(server.rstrip("/") + "/health", 5)
     except Exception as exc:
         _die(f"cannot reach {server}/health ({type(exc).__name__}); is `loom serve` running?")
-    served = [str(r) for r in (data.get("repos") or [])] or \
-        ([str(data["repo"])] if data.get("repo") else [])
+    served = _served(data)
     if not data.get("ok") or not served:
         _die(f"{server}/health did not name a repo; refusing to guess the id salt")
     return served
@@ -279,6 +289,144 @@ def cmd_init(args: argparse.Namespace) -> None:
           f"  spec      {os.path.join(_templates(), 'spec.md')}\n\n{BYPASS_NOTE}")
 
 
+def _walk_up(start: str, *parts: str) -> str | None:
+    """Nearest `<ancestor>/<*parts>` at or above `start` — the walk `gate` does for its
+    per-repo config, applied to `.claude/settings.json` and `.mcp.json` (which Claude Code
+    itself also resolves by walking up from the session's cwd)."""
+    cur = os.path.abspath(start)
+    while True:
+        candidate = os.path.join(cur, *parts)
+        if os.path.isfile(candidate):
+            return candidate
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+
+
+def _json_file(path: str | None) -> dict:
+    """A JSON object read from `path`; anything unreadable or non-object reads as empty —
+    doctor REPORTS a broken file as a failed check, it never dies on one."""
+    try:
+        with open(path, encoding="utf-8") as fh:                  # type: ignore[arg-type]
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def cmd_doctor(args: argparse.Namespace) -> None:
+    """MULTIREPO-SPEC §4: eight checks over ONE checkout, PASS/FAIL/WARN, exit 0 iff no FAIL.
+
+    The sellability tool — "is loom actually wired up here?" answered without reading any
+    docs. Every check catches its own failure and degrades to a FAIL row: the table always
+    prints all eight, because the row that explains the breakage is usually not the first
+    one to fail. `loom-gate` runs for real (check 7), so a green table means the whole
+    chain — config discovery, hook binary, server, claim decision — just worked.
+    """
+    from loom.hook import gate as hook_gate     # lazy: keeps `loom serve`'s import graph thin
+
+    start = os.path.abspath(args.repo_root) if args.repo_root else os.getcwd()
+    rows: list[tuple[str, str, str]] = []
+
+    def row(name: str, ok: bool, detail: str, warn: bool = False) -> None:
+        rows.append(("WARN" if warn else "PASS" if ok else "FAIL", name, detail))
+
+    # 1 config — the gate's own discovery, so doctor and the hook can never disagree.
+    cfg_path = (os.environ.get("LOOM_CONFIG") or hook_gate._walk_up_config(start)
+                or os.path.expanduser("~/.loom/config.toml"))
+    cfg = hook_gate.load_config(hook_gate.config_start_dir({"cwd": start}))
+    row("config", cfg is not None,
+        f"{cfg_path} (repo={cfg['repo']}, agent={cfg['agent']})" if cfg else
+        f"no usable config at {cfg_path} — run `loom init --server URL` in this repo")
+
+    # 2 server
+    served: list[str] = []
+    detail = "skipped — no config to name a server"
+    if cfg:
+        try:
+            data = _get_json(cfg["server_url"].rstrip("/") + "/health", 3)
+            served = _served(data)
+            detail = f"{cfg['server_url']} serves: {', '.join(served) or '(nothing)'}"
+        except Exception as exc:
+            detail = (f"{cfg['server_url']} unreachable ({type(exc).__name__}) — "
+                      "is `loom serve` running?")
+    row("server", bool(served), detail)
+
+    # 3 repo match — a salt the server does not serve is answered `allow/unindexed`
+    # forever: the gate looks alive and checks nothing. That is the silent failure.
+    repo = cfg["repo"] if cfg else ""
+    row("repo match", bool(repo) and repo in served,
+        f"'{repo}' is served" if repo and repo in served else
+        f"config repo '{repo}' is not served ({', '.join(served) or 'nothing served'})")
+
+    # 4 gate binary
+    gate_bin = shutil.which("loom-gate") or ""
+    row("gate binary", bool(gate_bin) and os.access(gate_bin, os.X_OK),
+        gate_bin or "`loom-gate` is not on PATH — install loom (uv sync) and re-run loom init")
+
+    # 5 hook registered — match the COMMAND SUBSTRING, not today's `shutil.which` path: a
+    # moved venv is a stale hook to fix, but an unmoved one must not read as unregistered.
+    settings = _walk_up(start, ".claude", "settings.json")
+    hooked = any("loom-gate" in str(hook.get("command") or "")
+                 for group in (_json_file(settings).get("hooks") or {}).get("PreToolUse") or []
+                 if isinstance(group, dict)
+                 for hook in group.get("hooks") or [] if isinstance(hook, dict))
+    row("hook registered", hooked, settings if hooked else
+        f"no loom-gate PreToolUse hook in {settings or '<no .claude/settings.json>'} "
+        "— run loom init")
+
+    # 6 mcp registered
+    mcp_path = _walk_up(start, ".mcp.json")
+    want = cfg["server_url"].rstrip("/") + "/mcp" if cfg else ""
+    entry = (_json_file(mcp_path).get("mcpServers") or {}).get("loom") or {}
+    url = str(entry.get("url") or "") if isinstance(entry, dict) else ""
+    row("mcp registered", bool(want) and url == want, f"{mcp_path} -> {url}" if want and url == want
+        else f"mcpServers.loom.url is {url or 'absent'} in "
+             f"{mcp_path or '<no .mcp.json>'}, expected {want or '<no config>'}")
+
+    # 7 gate round-trip — the §7.5 payload is denied HOOK-side, so this proves the chain
+    # without depending on index or claim state (and stays honest with a dead server).
+    ok, detail = False, "skipped — needs a config and `loom-gate` on PATH"
+    if cfg and gate_bin:
+        try:
+            proc = subprocess.run([gate_bin], input=json.dumps(VERIFY_PAYLOAD), text=True,
+                                  capture_output=True, timeout=20,
+                                  env={**os.environ, "LOOM_CONFIG": cfg_path})
+            ok = proc.returncode == 2
+            detail = ("exit 2 (deny) from the real gate" if ok else
+                      f"expected exit 2, got {proc.returncode}: {proc.stderr.strip()[-120:]}")
+        except Exception as exc:
+            detail = f"could not run {gate_bin} ({type(exc).__name__})"
+    row("gate round-trip", ok, detail)
+
+    # 8 index freshness — WARN, not FAIL: an unindexed repo gates nothing, but it is a
+    # one-command fix and never a reason to fail a CI-style check.
+    ok, warn, detail = False, False, "skipped — server or repo unknown"
+    if cfg and repo in served and served:
+        try:
+            counts = _get_json(f"{cfg['server_url'].rstrip('/')}/state?repo="
+                               f"{urllib.parse.quote(repo)}", 3).get("counts") or {}
+            nodes = int(counts.get("nodes") or 0)
+            ok, warn = nodes > 0, nodes == 0
+            detail = (f"{nodes} node(s) indexed for '{repo}'" if nodes else
+                      f"'{repo}' has no indexed nodes — run `loom index --repo {repo} "
+                      "--repo-root PATH`")
+        except Exception as exc:
+            detail = f"/state unreachable ({type(exc).__name__})"
+    row("index freshness", ok, detail, warn=warn)
+
+    pad = max(len(name) for _s, name, _d in rows)
+    print(f"loom doctor — {start}")
+    for status, name, detail in rows:
+        print(f"  {status}  {name.ljust(pad)}  {detail}")
+    failed = sum(status == "FAIL" for status, _n, _d in rows)
+    if failed:
+        sys.stdout.flush()          # the table is the answer; keep it ABOVE the exit line
+        _die(f"{failed} check(s) failed")
+    print(f"  ok — {len(rows)} checks, no failures")
+
+
 def cmd_ls(args: argparse.Namespace) -> None:
     conn = connect(_existing_db_of(args))
     rows = conn.execute(
@@ -361,6 +509,8 @@ VERBS = {
              [("--server", {"required": True}), ("--agent", {}),
               ("--repo", {"help": "required when the server serves several repos"}),
               ("--repo-root", {"help": "defaults to the current directory"})]),
+    "doctor": (cmd_doctor, "check this checkout's loom wiring end to end",
+               [("--repo-root", {"help": "defaults to the current directory"})]),
     "index": (cmd_index, "index a repo into the loom graph",
               [("--repo-root", {"required": True}), ("--repo", {"default": ""}), ("--db", {}),
                ("--changed", {"action": "store_true"})]),

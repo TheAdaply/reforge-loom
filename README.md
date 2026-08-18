@@ -1,8 +1,8 @@
 # loom
 
 **Many threads, one fabric, no tangles.** A coordination gate for teams of coding agents (multiple
-users, multiple machines, one git repository): every agent must declare a plan — which symbols it
-will change and why — before editing. Overlapping plans are refused at declare time with the
+users, multiple machines, one or many git repositories): every agent must declare a plan — which
+symbols it will change and why — before editing. Overlapping plans are refused at declare time with the
 owner's spec embedded in the refusal, and a Claude Code PreToolUse hook enforces the claims at edit
 time, so the merge conflict never gets written.
 
@@ -34,6 +34,47 @@ can actually call the tools the protocol tells it to call, appends the protocol 
 fallback — so initializing a second repo can never point this one's gate at the wrong server),
 pings the server, and verifies the gate with a synthetic payload. After that you never touch
 loom again — you just talk to your agent.
+
+## Several repositories, one server
+
+`--repo-root` is repeatable, and each root may be named. One process, one database, one
+dashboard, one gate endpoint — the graph, plans and claims are keyed by repo name, so the same
+`svc.py` in two repos is two independent symbols that never contend:
+
+```bash
+uv run --directory <this-dir> loom serve \
+  --repo-root api=/srv/checkouts/api \
+  --repo-root web=/srv/checkouts/web \
+  --db /srv/loom/loom.sqlite3 --port 8788
+```
+
+`NAME=` is optional (the name defaults to the directory's basename), names must be unique, and
+**pass `--db` explicitly whenever you serve more than one root** — otherwise the database lands
+beside the *first* root, which is a rule your team has to remember. Every root is indexed at boot,
+one `loom: indexed {...}` line per repo.
+
+Users then name the repo their checkout belongs to:
+
+```bash
+uv run --directory <this-dir> loom init --server http://<host>:8788 --agent <your-name> --repo api
+```
+
+With one served repo `--repo` stays optional; with several it is required, and omitting it prints
+the served names. Re-index a single repo with `loom index --repo api --repo-root /srv/checkouts/api`.
+The dashboard grows a repo switcher (chips in the header) as soon as the server serves more than one.
+
+## Is it wired up? (`loom doctor`)
+
+```bash
+uv run --directory <this-dir> loom doctor          # inside your checkout
+```
+
+Eight checks, one PASS/FAIL/WARN row each, exit 0 unless something FAILs: the config file that
+wins discovery, the server's reachability and served repos, whether your configured repo is one of
+them, `loom-gate` on PATH, the PreToolUse hook in `.claude/settings.json`, the loom entry in
+`.mcp.json`, a **real** gate round-trip (a synthetic payload through the actual hook binary, which
+must exit 2), and whether your repo has an index yet (WARN, not FAIL — that one is a one-command
+fix). It is the fastest answer to "is loom actually doing anything here?"
 
 ## The protocol (what agents do)
 
@@ -84,12 +125,14 @@ carries an inline assert.
 ## Tests
 
 ```bash
-uv run --directory <this-dir> pytest tests -q     # 254 tests
+uv run --directory <this-dir> pytest tests -q     # 279 tests
 ```
 
 `tests/server/test_concurrency.py` is the one that matters: two HTTP clients race `declare_plan`
 on overlapping targets against a real subprocess server — exactly one wins, the loser gets the
-winner's spec.
+winner's spec. `test_multirepo.py` is its multi-repo twin (the same symbol name claimed in two
+served repos must not contend), and `test_doctor.py` runs the eight checks against a live server
+and a checkout wired by the real `loom init`.
 
 ## Design & provenance
 
@@ -105,6 +148,7 @@ winner's spec.
 
 ## MVP limits (deliberate)
 
-Python-only indexing; one repo per server; caller-asserted identity (no auth yet); no rename
-tracking; no impact analysis beyond one-hop CALLS expansion; the eval's real-codebase three-arm
-runs are post-MVP (the harness and metrics ship now).
+Python-only indexing; caller-asserted identity (no auth yet, and no per-repo auth); no cross-repo
+edges or claims (a plan lives in exactly one repo); no rename tracking; no impact analysis beyond
+one-hop CALLS expansion; the eval's real-codebase three-arm runs are post-MVP (the harness and
+metrics ship now).

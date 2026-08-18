@@ -73,6 +73,20 @@ def test_dashboard_page_serves(live_server):
     assert "the fabric" in body  # signature panel present
 
 
+def test_the_repo_switcher_is_wired_but_stays_invisible_on_a_one_repo_server(live_server):
+    """MULTIREPO-SPEC §5: the page carries the switcher; `state.repos` decides whether it
+    draws. A single served repo must leave today's header exactly as it was, so the whole
+    feature reduces to one empty container plus a poll URL that can carry `?repo=`."""
+    base, _db = live_server
+    page = _get(base + "/")[1]
+    assert 'id="repos"' in page                                   # container present...
+    assert "repos.length > 1" in page                             # ...drawn only for many
+    assert '"/state?repo=" + encodeURIComponent(selectedRepo)' in page
+
+    state = json.loads(_get(base + "/state")[1])
+    assert state["repos"] == ["demo"] and state["repo"] == "demo"  # /state plumbing
+
+
 def test_state_shape_and_claims(live_server):
     base, db = live_server
     conn = connect(db)
