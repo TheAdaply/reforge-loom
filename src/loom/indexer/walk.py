@@ -53,10 +53,15 @@ from loom.server.ids import node_id
 #                    the README's MVP limits and in docs/troubleshooting.md. Not yet
 #                    configurable; making it so is a behavior change that needs its own
 #                    DECISIONS-DELTA entry.
+# Tooling/vendor dirs only. `tests/` is deliberately NOT here (council W5): agents spend
+# real edit budget in test trees, and an ungated directory is a silent coordination hole —
+# loom gates everything it indexes, and it indexes everything that is plausibly source.
 EXCLUDE_DIRS = {
     ".git", ".venv", "venv", "node_modules", "site-packages", "build", "dist", "__pycache__",
-    "frontend", "alembic", "tests",
 }
+# Files above this size get no node at all (they are read+hashed EVERY run; a checked-in
+# binary would tax every incremental pass). Documented gap: such files are ungated.
+_INDEX_CAP_BYTES = 2_000_000
 
 _PARSER = Parser(LANGUAGE)
 
@@ -80,12 +85,23 @@ def _edge(conn: sqlite3.Connection, src: str, dst: str, kind: str) -> None:
 
 
 def discover_files(repo_root: str) -> list[str]:
-    """Repo-root-relative POSIX paths of every indexable ``*.py`` file, sorted."""
+    """Repo-root-relative POSIX paths of every indexable file, sorted.
+
+    ALL regular files under the cap are discovered (bench E3): non-Python files get a File
+    node so FILE-LEVEL claims and gating work in any language; symbol-level parsing stays
+    Python-only. Dotfiles at the top of a checkout (.gitignore, .mcp.json) are included —
+    they are exactly the shared hot files teams fight over."""
     out: list[str] = []
     for dirpath, dirnames, filenames in os.walk(repo_root):
         dirnames[:] = sorted(d for d in dirnames if d not in EXCLUDE_DIRS)
-        out += [norm_path(os.path.relpath(os.path.join(dirpath, f), repo_root))
-                for f in filenames if f.endswith(".py")]
+        for f in filenames:
+            full = os.path.join(dirpath, f)
+            try:
+                if not os.path.isfile(full) or os.path.getsize(full) > _INDEX_CAP_BYTES:
+                    continue
+            except OSError:
+                continue
+            out.append(norm_path(os.path.relpath(full, repo_root)))
     return sorted(out)
 
 
@@ -206,7 +222,14 @@ def index_repo(conn, repo: str, repo_root: str, changed_only: bool = False) -> d
     # node rows only for the files whose bytes moved. The resolver is therefore fed exactly
     # the same inputs on an incremental run as on a cold one — that identity IS the fix.
     res, trees = Resolver(), {}
+    py_files = [rel for rel in files if rel.endswith(".py")]
     for rel in files:
+        if not rel.endswith(".py"):
+            # Non-Python: File node only (fresh-gated) — enough for file-level claims and
+            # gating in any language (bench E3); no symbols, no edges.
+            if rel in fresh:
+                _write_file_nodes(conn, repo, rel, sources[rel], [])
+            continue
         trees[rel] = _PARSER.parse(sources[rel])
         ents = _entities(trees[rel].root_node)
         if rel in fresh:
@@ -222,11 +245,15 @@ def index_repo(conn, repo: str, repo_root: str, changed_only: bool = False) -> d
     # in-repo by the frozen edge directions, so this touches no other repo's rows.
     conn.execute("DELETE FROM edges WHERE kind IN ('CALLS','IMPORTS') AND src IN"
                  " (SELECT id FROM nodes WHERE repo=?)", (repo,))
-    for rel in files:  # File->File IMPORTS (src = importer), then bucketed CALLS (src = caller).
+    for rel in py_files:  # File->File IMPORTS (src = importer), then bucketed CALLS (src = caller).
         for dst in res.resolve_imports(rel):
             _edge(conn, node_id(repo, rel, ""), node_id(repo, dst, ""), "IMPORTS")
         for sq, dp, dq in res.resolve_calls(rel, trees[rel]):
             _edge(conn, node_id(repo, rel, sq), node_id(repo, dp, dq), "CALLS")
+    # Refresh SQLite's planner statistics: without this, declare_plan's closure queries
+    # flip to a table-scan plan at ~django-tests scale — 9.3s vs 3.9ms, the 2,402x cliff
+    # bench E2 measured and its judge reproduced. One statement, every index run.
+    conn.execute("ANALYZE")
     n = conn.execute("SELECT COUNT(*) c FROM nodes WHERE repo=?", (repo,)).fetchone()["c"]
     e = conn.execute("SELECT COUNT(*) c FROM edges WHERE src IN"
                      " (SELECT id FROM nodes WHERE repo=?)", (repo,)).fetchone()["c"]

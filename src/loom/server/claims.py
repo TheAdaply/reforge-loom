@@ -284,15 +284,24 @@ def _scope_for_conflicts(conn: sqlite3.Connection, repo: str, ids: set[str]) -> 
 
 
 def find_conflicts(conn: sqlite3.Connection, repo: str, write_set: set[str], read_set: set[str],
-                   own_plan_ids: set[str], now: float) -> list[dict[str, Any]]:
+                   own_plan_ids: set[str], now: float, *,
+                   expanded: set[str] = frozenset()) -> list[dict[str, Any]]:
     """Active foreign claims intersecting my sets. write-write blocks; mixed modes warn.
 
     Each wanted node is judged over its CONTAINS scope (§4): declaring a whole file
     intersects live claims on the symbols inside it, and declaring a symbol intersects a
     live claim on its file/class. The scope widens the QUESTION only — the claim rows
     written by declare/rescope are still exactly the resolved targets plus §5.3's CALLS hop.
+
+    `expanded` names the members of `write_set` that arrived via §5.3's CALLS hop rather
+    than the agent's own targets. Those scope UP ONLY: calling a class must contend with a
+    claim on that class or its file, but must NOT down-explode into every method the agent
+    never named — that residue re-created file-granular conflicts one hop out (council W2,
+    second half; the first half was the mixed-walk pivot fixed in `_scope_for_conflicts`).
     """
-    w = _scope_for_conflicts(conn, repo, write_set)
+    explicit = write_set - expanded
+    w = _scope_for_conflicts(conn, repo, explicit) \
+        | contains_closure(conn, repo, set(expanded) & write_set, down=False)
     r = _scope_for_conflicts(conn, repo, read_set)
     wanted = {n: "write" for n in w}
     wanted.update({n: "read" for n in r if n not in w})
@@ -346,7 +355,8 @@ def _intake(conn: sqlite3.Connection, repo: str, agent: str, targets: list[str],
     write_set = set(wids) | {n for s in expanded.values() for n in s}
     read_set = set(rids) - write_set
     warnings = find_conflicts(conn, repo, write_set, read_set,
-                              _own_plan_ids(conn, repo, agent, now), now)
+                              _own_plan_ids(conn, repo, agent, now), now,
+                              expanded=write_set - set(wids))
     if any(c["kind"] == "write-write" for c in warnings):
         log_event(conn, agent, "denied", f"{why} conflict", repo)
         return ({"ok": False, "reason": "conflict", "conflicts": warnings}, set(), set(), {}, [])

@@ -98,11 +98,14 @@ def test_discover_files_lists_every_py_file(repo_root: str) -> None:
 
 
 def test_exclude_dirs_are_pruned(repo_root: str) -> None:
-    for bad in ("__pycache__", "node_modules", ".venv", "tests"):
+    # Vendor/tooling dirs are pruned; `tests/` is DELIBERATELY indexed since council W5 —
+    # an ungated test tree was a silent coordination hole (see test_all_languages.py).
+    for bad in ("__pycache__", "node_modules", ".venv"):
         assert bad in EXCLUDE_DIRS
         os.makedirs(os.path.join(repo_root, bad), exist_ok=True)
         with open(os.path.join(repo_root, bad, "ghost.py"), "w") as fh:
             fh.write("def ghost(): pass\n")
+    assert "tests" not in EXCLUDE_DIRS
     assert not [p for p in discover_files(repo_root) if "ghost" in p]
 
 

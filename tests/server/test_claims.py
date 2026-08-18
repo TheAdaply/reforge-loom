@@ -586,3 +586,60 @@ class TestFuzzyTailGate:
         assert gconn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 0
         # ...while the 6-character tail of the same symbol still resolves (frozen above).
         assert [r["id"] for r in claims.resolve_query(gconn, REPO, "hentic")] == [nid(AUTH)]
+
+
+class TestExpansionScopeIsUpOnly:
+    """Council W2 second half: CALLS-expansion-swept containers must not down-explode.
+
+    A on AuthService/salt, B on bootstrap: bootstrap's one-hop CALLS expansion sweeps in
+    the AuthService CLASS node (constructor call). Before the fix, that container was
+    down-closed into every method, so two functions sharing nothing but a class/file
+    refused each other. Explicit container targets still down-close (declaring a file or
+    class = claiming its contents); only expansion-swept containers scope up-only.
+    """
+
+    def _fixture_db(self, tmp_path):
+        from loom.indexer.walk import index_repo
+        from loom.server.db import connect, init_db
+        db = str(tmp_path / "w2.sqlite3")
+        init_db(db)
+        conn = connect(db)
+        import os
+        root = os.path.join(os.path.dirname(__file__), "..", "fixtures", "pyrepo")
+        index_repo(conn, "app", os.path.abspath(root), changed_only=False)
+        return conn
+
+    def _spec(self):
+        return ("# Spec: t\n\n## Goal *(mandatory)*\nT. T.\n\n## Write targets *(mandatory)*\n- x\n\n"
+                "## New/changed interfaces *(mandatory)*\nNone.\n\n## Assumes *(mandatory)*\nNone.\n\n"
+                "## Out of scope *(mandatory)*\nNone.\n")
+
+    def test_sibling_functions_via_expansion_do_not_conflict(self, tmp_path):
+        from loom.server.claims import declare_plan
+        from loom.server.db import immediate, now_s
+        conn = self._fixture_db(tmp_path)
+        with immediate(conn):
+            a = declare_plan(conn, agent="a", repo="app", branch="", title="t",
+                             spec_md=self._spec(), write_targets=["svc.py::AuthService/salt"],
+                             assumes=[], ttl_s=600, now=now_s())
+        assert a["ok"], a
+        with immediate(conn):
+            b = declare_plan(conn, agent="b", repo="app", branch="", title="t2",
+                             spec_md=self._spec(), write_targets=["svc.py::bootstrap"],
+                             assumes=[], ttl_s=600, now=now_s())
+        assert b["ok"], b.get("conflicts")
+
+    def test_explicit_file_target_still_conflicts_with_inner_symbol(self, tmp_path):
+        from loom.server.claims import declare_plan
+        from loom.server.db import immediate, now_s
+        conn = self._fixture_db(tmp_path)
+        with immediate(conn):
+            a = declare_plan(conn, agent="a", repo="app", branch="", title="t",
+                             spec_md=self._spec(), write_targets=["svc.py::AuthService/salt"],
+                             assumes=[], ttl_s=600, now=now_s())
+        assert a["ok"]
+        with immediate(conn):
+            b = declare_plan(conn, agent="b", repo="app", branch="", title="t2",
+                             spec_md=self._spec(), write_targets=["svc.py"],
+                             assumes=[], ttl_s=600, now=now_s())
+        assert not b["ok"]  # explicitly claiming the FILE still contends with salt inside it
