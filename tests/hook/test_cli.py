@@ -206,3 +206,13 @@ def test_templates_ship_in_package_with_the_frozen_shape() -> None:
     assert len(spec) <= 8000
     assert snippet.startswith("<!-- loom protocol v1")
     assert "## loom — shared-repo coordination protocol" in snippet
+
+
+def test_ls_missing_db_dies_cleanly(tmp_path, capsys, monkeypatch):
+    """Read verbs must not conjure an empty db at a mistyped path (orchestrator fix, post-final-gate)."""
+    missing = str(tmp_path / "nope" / "absent.sqlite3")
+    with pytest.raises(SystemExit) as exc:
+        run_cli(monkeypatch, "ls", "--db", missing)
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "no loom database" in err and missing in err

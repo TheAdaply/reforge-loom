@@ -61,6 +61,15 @@ def _db_of(args: argparse.Namespace, repo_root: str = "") -> str:
     return args.db or os.path.join(repo_root or os.getcwd(), ".loom.sqlite3")
 
 
+def _existing_db_of(args: argparse.Namespace) -> str:
+    # Read verbs must not conjure an empty database at a mistyped path and
+    # report "0 active claims" — a missing db is an operator error, said plainly.
+    path = _db_of(args)
+    if not os.path.exists(path):
+        _die(f"no loom database at {path} — is `loom serve` running with this --db?")
+    return path
+
+
 def _templates() -> str:
     return os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates")
 
@@ -174,7 +183,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 
 
 def cmd_ls(args: argparse.Namespace) -> None:
-    conn = connect(_db_of(args))
+    conn = connect(_existing_db_of(args))
     rows = conn.execute(
         "SELECT c.node_id, c.mode, c.plan_id, p.agent, p.title, p.ttl_expires, n.path, n.qualname "
         "FROM claims c LEFT JOIN plans p ON p.id = c.plan_id LEFT JOIN nodes n ON n.id = c.node_id "
@@ -192,7 +201,7 @@ def cmd_ls(args: argparse.Namespace) -> None:
 
 
 def cmd_show(args: argparse.Namespace) -> None:
-    conn = connect(_db_of(args))
+    conn = connect(_existing_db_of(args))
     if args.id.startswith("lm-"):
         plan = conn.execute("SELECT * FROM plans WHERE id = ?", (args.id,)).fetchone()
         if plan is None:
@@ -221,7 +230,7 @@ def cmd_show(args: argparse.Namespace) -> None:
 
 def cmd_release(args: argparse.Namespace) -> None:
     _no_empty(args, "agent")
-    conn = connect(_db_of(args))
+    conn = connect(_existing_db_of(args))
     stamp, err, freed = iso(now_s()), "", 0
     with immediate(conn):
         plan = conn.execute("SELECT agent, status FROM plans WHERE id = ?", (args.plan_id,)).fetchone()
