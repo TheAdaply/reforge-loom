@@ -70,7 +70,7 @@ carries an inline assert.
 ## Tests
 
 ```bash
-uv run --directory <this-dir> pytest tests -q     # 215 tests
+uv run --directory <this-dir> pytest tests -q     # 217 tests
 ```
 
 `tests/server/test_concurrency.py` is the one that matters: two HTTP clients race `declare_plan`

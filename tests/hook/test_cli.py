@@ -216,3 +216,19 @@ def test_ls_missing_db_dies_cleanly(tmp_path, capsys, monkeypatch):
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "no loom database" in err and missing in err
+
+
+def test_serve_indexes_at_boot(tmp_path, monkeypatch, capsys):
+    """PLAN §4.5: `loom serve` = server plus indexer, one process (orchestrator fix)."""
+    import sqlite3
+    import loom.server.app as app_mod
+
+    fixture = os.path.join(os.path.dirname(__file__), "..", "fixtures", "pyrepo")
+    db = str(tmp_path / "serve.sqlite3")
+    monkeypatch.setattr(app_mod, "serve", lambda *a, **k: None)
+    run_cli(monkeypatch, "serve", "--repo-root", os.path.abspath(fixture), "--db", db)
+    con = sqlite3.connect(db)
+    nodes = con.execute("SELECT count(*) FROM nodes").fetchone()[0]
+    edges = con.execute("SELECT count(*) FROM edges").fetchone()[0]
+    assert nodes > 0 and edges > 0
+    assert "loom: indexed" in capsys.readouterr().out

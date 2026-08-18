@@ -79,11 +79,22 @@ def _ref(row) -> str:
 
 
 def cmd_serve(args: argparse.Namespace) -> None:
+    from loom.indexer.walk import index_repo
     from loom.server.app import serve
 
     repo_root = os.path.abspath(args.repo_root)
+    repo = args.repo or _repo_of(repo_root)
+    db = _db_of(args, repo_root)
+    # PLAN §4.5: `loom serve` starts server PLUS indexer — one process, no separate
+    # `loom index` step before first use. Incremental thereafter via mtime+hash.
+    init_db(db)
+    conn = connect(db)
+    has_nodes = conn.execute("SELECT 1 FROM nodes LIMIT 1").fetchone() is not None
+    stats = index_repo(conn, repo, repo_root, changed_only=has_nodes)
+    conn.close()
+    print(f"loom: indexed {json.dumps(stats, default=str)}", flush=True)
     # The repo salt is minted once, here, and echoed to every `loom init` (§11.19).
-    serve(args.host, args.port, _db_of(args, repo_root), args.repo or _repo_of(repo_root), repo_root)
+    serve(args.host, args.port, db, repo, repo_root)
 
 
 def cmd_index(args: argparse.Namespace) -> None:
