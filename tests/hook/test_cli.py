@@ -232,3 +232,25 @@ def test_serve_indexes_at_boot(tmp_path, monkeypatch, capsys):
     edges = con.execute("SELECT count(*) FROM edges").fetchone()[0]
     assert nodes > 0 and edges > 0
     assert "loom: indexed" in capsys.readouterr().out
+
+
+def test_init_registers_mcp_server(tmp_path, monkeypatch):
+    """Red-team fix: without .mcp.json agents are TOLD to declare_plan but CANNOT call it."""
+    import json as _json
+    from loom.cli import main as cli_mod
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    # pre-existing .mcp.json with another server must be MERGED, not clobbered
+    (repo_root / ".mcp.json").write_text(_json.dumps(
+        {"mcpServers": {"other": {"type": "http", "url": "http://x/mcp"}}}))
+    monkeypatch.setattr(cli_mod, "_health", lambda server: "testrepo")
+    monkeypatch.setattr(cli_mod.shutil, "which", lambda name: "/usr/bin/true-gate")
+    monkeypatch.setattr(cli_mod.subprocess, "run",
+                        lambda *a, **k: type("P", (), {"returncode": 2, "stderr": ""})())
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    run_cli(monkeypatch, "init", "--server", "http://127.0.0.1:9999",
+            "--agent", "tester", "--repo-root", str(repo_root))
+    data = _json.loads((repo_root / ".mcp.json").read_text())
+    assert data["mcpServers"]["loom"] == {"type": "http", "url": "http://127.0.0.1:9999/mcp"}
+    assert data["mcpServers"]["other"]["url"] == "http://x/mcp"  # merged, not clobbered

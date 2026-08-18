@@ -161,6 +161,30 @@ def _append_snippet(repo_root: str) -> bool:
     return True
 
 
+def _merge_mcp_json(repo_root: str, server: str) -> bool:
+    """Register loom's MCP tool surface in the repo's .mcp.json (idempotent MERGE).
+
+    Without this the protocol is a trap: CLAUDE.md tells agents to declare_plan and
+    the gate denies them for not declaring, but a fresh session has no way to call
+    the tool. Found by the post-MVP red-team pass; the hook enforces, this enables."""
+    path = os.path.join(repo_root, ".mcp.json")
+    data = {}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            _die(f"{path} is not a JSON object; fix it by hand — loom will not overwrite it")
+    servers = data.setdefault("mcpServers", {})
+    entry = {"type": "http", "url": server.rstrip("/") + "/mcp"}
+    if servers.get("loom") == entry:
+        return False
+    servers["loom"] = entry
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    return True
+
+
 def cmd_init(args: argparse.Namespace) -> None:
     _no_empty(args, "server", "agent")
     repo_root = os.path.abspath(args.repo_root) if args.repo_root else os.getcwd()
@@ -175,6 +199,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         fh.write(f'server_url = "{args.server}"\nagent = "{agent}"\nrepo = "{repo}"\n'
                  f'repo_root = "{repo_root}"\n')
     added = _merge_settings(repo_root, gate)
+    mcp_added = _merge_mcp_json(repo_root, args.server)
     appended = _append_snippet(repo_root)
     # A mistyped command path leaves the gate silently disabled — prove exit 2 (§7.5).
     try:
@@ -188,6 +213,8 @@ def cmd_init(args: argparse.Namespace) -> None:
           f"  config    {os.path.join(home, 'config.toml')}\n"
           f"  hooks     {os.path.join(repo_root, '.claude', 'settings.json')} "
           f"({added} group(s) added, gate verified)\n"
+          f"  mcp       {os.path.join(repo_root, '.mcp.json')} "
+          f"({'loom server added' if mcp_added else 'already registered'})\n"
           f"  protocol  {'appended to' if appended else 'already in'} "
           f"{os.path.join(repo_root, 'CLAUDE.md')}\n"
           f"  spec      {os.path.join(_templates(), 'spec.md')}\n\n{BYPASS_NOTE}")
