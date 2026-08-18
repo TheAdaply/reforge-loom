@@ -111,7 +111,7 @@ def delete_file_nodes(conn: sqlite3.Connection, repo: str, rel_path: str) -> Non
     marks = ",".join("?" * len(ids))
     conn.execute(f"DELETE FROM edges WHERE src IN ({marks}) OR dst IN ({marks})", ids + ids)
     conn.execute("DELETE FROM nodes WHERE repo=? AND path=?", (repo, rel_path))
-    log_event(conn, "indexer", "indexed", f"deleted {rel_path} ({len(ids)} nodes)")
+    log_event(conn, "indexer", "indexed", f"deleted {rel_path} ({len(ids)} nodes)", repo)
 
 
 def _index_tree(conn, repo: str, rel: str, src: bytes, tree: Any) -> list[tuple[str, str, int, int]]:
@@ -175,5 +175,5 @@ def index_repo(conn, repo: str, repo_root: str, changed_only: bool = False) -> d
     e = conn.execute("SELECT COUNT(*) c FROM edges WHERE src IN"
                      " (SELECT id FROM nodes WHERE repo=?)", (repo,)).fetchone()["c"]
     log_event(conn, "indexer", "indexed",
-              f"{repo}: {len(files)} files, {n} nodes, {e} edges, {len(changed)} changed")
+              f"{repo}: {len(files)} files, {n} nodes, {e} edges, {len(changed)} changed", repo)
     return {"files": len(files), "nodes": n, "edges": e, "changed": changed}

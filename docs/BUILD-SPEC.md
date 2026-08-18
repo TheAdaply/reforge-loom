@@ -46,6 +46,10 @@ nothing cuttable without breaking the frozen §7.5 registration contract. See §
 
 ## 2. FROZEN ARTIFACT — SQLite DDL + connection pragmas
 
+> DECISIONS pointer (not an edit — this section stays historical): `events` has since gained a
+> `repo TEXT NOT NULL DEFAULT ''` column, applied to existing databases by a guarded
+> `ALTER TABLE` in `init_db` (`db.MIGRATIONS`). See MULTIREPO-SPEC §3 / delta D1.
+
 `src/loom/server/db.py` module constant `DDL`, executed by `init_db()`:
 
 ```sql

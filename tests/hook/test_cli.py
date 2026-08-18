@@ -272,7 +272,9 @@ def test_init_registers_mcp_server(tmp_path, monkeypatch):
     # pre-existing .mcp.json with another server must be MERGED, not clobbered
     (repo_root / ".mcp.json").write_text(_json.dumps(
         {"mcpServers": {"other": {"type": "http", "url": "http://x/mcp"}}}))
-    monkeypatch.setattr(cli_mod, "_health", lambda server: "testrepo")
+    # `_health` returns the SERVED LIST now (MULTIREPO-SPEC §1): init has to know whether
+    # the name is auto-selectable before it can auto-select it.
+    monkeypatch.setattr(cli_mod, "_health", lambda server: ["testrepo"])
     monkeypatch.setattr(cli_mod.shutil, "which", lambda name: "/usr/bin/true-gate")
     monkeypatch.setattr(cli_mod.subprocess, "run",
                         lambda *a, **k: type("P", (), {"returncode": 2, "stderr": ""})())

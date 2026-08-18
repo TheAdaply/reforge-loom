@@ -31,7 +31,8 @@ def run(mcp, calls: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
 def server(tmp_path):
     db = str(tmp_path / "loom.sqlite3")
     seed(db)
-    return build_server(db, "demo")
+    # MULTIREPO-SPEC D3: build_server takes {name: repo_root}; one entry = today's server.
+    return build_server(db, {"demo": str(tmp_path)})
 
 
 def test_every_tool_is_registered_and_annotated(tmp_path) -> None:
@@ -168,7 +169,8 @@ def test_errors_are_data_never_raised(tmp_path) -> None:
     ])
     assert results[0]["ok"] is True
     for r in results[1:4]:
-        assert r == {"ok": False, "reason": "wrong_repo"}
+        # MULTIREPO-SPEC §2: an unserved repo name is `unknown_repo` + the served list.
+        assert r == {"ok": False, "reason": "unknown_repo", "served": ["demo"]}
     assert results[4] == {"ok": False, "reason": "unknown_plan"}
     assert results[5] == {"renewed": 0, "reason": "unknown_plan"}
     assert results[6] == {"ok": False, "reason": "unknown_plan"}

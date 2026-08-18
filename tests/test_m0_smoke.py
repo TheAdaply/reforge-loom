@@ -64,7 +64,7 @@ def test_instructions_carry_the_protocol_snippet() -> None:
 
 
 def test_health_tool_over_an_in_process_client(tmp_path) -> None:
-    mcp = build_server(str(tmp_path / "loom.sqlite3"), "demo")
+    mcp = build_server(str(tmp_path / "loom.sqlite3"), {"demo": str(tmp_path)})
 
     async def call() -> dict:
         async with Client(mcp) as client:

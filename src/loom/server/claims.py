@@ -107,7 +107,7 @@ def sweep(conn: sqlite3.Connection, repo: str, now: float) -> list[str]:
         conn.execute("UPDATE claims SET released=? WHERE plan_id=? AND released IS NULL",
                      (iso(now), pid))
         conn.execute("UPDATE plans SET status='expired', updated=? WHERE id=?", (iso(now), pid))
-        log_event(conn, "loom", "expired", pid)
+        log_event(conn, "loom", "expired", pid, repo)
     return ids
 
 
@@ -288,7 +288,7 @@ def _intake(conn: sqlite3.Connection, repo: str, agent: str, targets: list[str],
     warnings = find_conflicts(conn, repo, write_set, read_set,
                               _own_plan_ids(conn, repo, agent, now), now)
     if any(c["kind"] == "write-write" for c in warnings):
-        log_event(conn, agent, "denied", f"{why} conflict")
+        log_event(conn, agent, "denied", f"{why} conflict", repo)
         return ({"ok": False, "reason": "conflict", "conflicts": warnings}, set(), set(), {}, [])
     return None, write_set, read_set, expanded, warnings
 
@@ -319,7 +319,7 @@ def declare_plan(conn: sqlite3.Connection, *, agent: str, repo: str, branch: str
     _insert_claims(conn, plan_id, write_set, "write", now)
     _insert_claims(conn, plan_id, read_set, "read", now)
     detail = plan_id + (f" ttl clamped to {TTL_FLOOR_S}s" if ttl_s and ttl_s < TTL_FLOOR_S else "")
-    log_event(conn, agent, "declared", detail)
+    log_event(conn, agent, "declared", detail, repo)
     return _granted(plan_id, expires, write_set, read_set, expanded, warnings)
 
 
@@ -343,13 +343,13 @@ def rescope(conn: sqlite3.Connection, *, plan_id: str, add_targets: list[str],
     expires = max(p["ttl_expires"], now + CLAIM_TTL_S)
     conn.execute("UPDATE plans SET ttl_expires=?, updated=? WHERE id=?",
                  (expires, iso(now), plan_id))
-    log_event(conn, p["agent"], "rescoped", plan_id)
+    log_event(conn, p["agent"], "rescoped", plan_id, p["repo"])
     return _granted(plan_id, expires, write_set, read_set, expanded, warnings)
 
 
 def renew(conn: sqlite3.Connection, plan_id: str, now: float) -> dict[str, Any]:
     """§5.8 — never shortens; an expired or non-active plan cannot be renewed."""
-    p = conn.execute("SELECT agent, status, ttl_expires FROM plans WHERE id=?",
+    p = conn.execute("SELECT agent, repo, status, ttl_expires FROM plans WHERE id=?",
                      (plan_id,)).fetchone()
     if not p:
         return {"renewed": 0, "reason": "unknown_plan"}
@@ -360,14 +360,14 @@ def renew(conn: sqlite3.Connection, plan_id: str, now: float) -> dict[str, Any]:
     expires = max(p["ttl_expires"], now + CLAIM_TTL_S)
     conn.execute("UPDATE plans SET ttl_expires=?, updated=? WHERE id=?",
                  (expires, iso(now), plan_id))
-    log_event(conn, p["agent"], "renewed", plan_id)
+    log_event(conn, p["agent"], "renewed", plan_id, p["repo"])
     return {"renewed": 1, "expires_ts": expires, "expires_iso": iso(expires)}
 
 
 def release(conn: sqlite3.Connection, plan_id: str, agent: str, status: str,
             now: float) -> dict[str, Any]:
     """§5.9 — owner-only, tombstones claims, no force flag exists."""
-    p = conn.execute("SELECT agent, status FROM plans WHERE id=?", (plan_id,)).fetchone()
+    p = conn.execute("SELECT agent, repo, status FROM plans WHERE id=?", (plan_id,)).fetchone()
     if not p:
         return {"ok": False, "reason": "unknown_plan"}
     if p["agent"] != agent:
@@ -379,7 +379,7 @@ def release(conn: sqlite3.Connection, plan_id: str, agent: str, status: str,
                        (iso(now), plan_id))
     n = cur.rowcount
     conn.execute("UPDATE plans SET status=?, updated=? WHERE id=?", (status, iso(now), plan_id))
-    log_event(conn, agent, "released", plan_id)
+    log_event(conn, agent, "released", plan_id, p["repo"])
     return {"ok": True, "released_claims": n, "plan_status": status}
 
 
@@ -420,11 +420,11 @@ def active_claims(conn: sqlite3.Connection, repo: str, now: float) -> list[dict[
              "expires_ts": r["ttl_expires"], "expires_iso": iso(r["ttl_expires"])} for r in rows]
 
 
-def _decide(conn: sqlite3.Connection, agent: str, decision: str, case: str, message: str,
-            node_id: str | None, plan_id: str | None,
+def _decide(conn: sqlite3.Connection, repo: str, agent: str, decision: str, case: str,
+            message: str, node_id: str | None, plan_id: str | None,
             owner: dict[str, Any] | None = None) -> dict[str, Any]:
     log_event(conn, agent, "allowed" if decision == "allow" else "denied",
-              f"{case} {node_id or ''}".strip())
+              f"{case} {node_id or ''}".strip(), repo)
     return {"decision": decision, "case": case, "message": message, "node_id": node_id,
             "plan_id": plan_id, "owner": owner}
 
@@ -448,25 +448,26 @@ def check_node(conn: sqlite3.Connection, *, repo: str, agent: str, node_id: str,
         conn.execute("UPDATE plans SET ttl_expires=MAX(ttl_expires, ?), updated=? "
                      "WHERE id=? AND status='active' AND ttl_expires > ?",
                      (now + CLAIM_TTL_S, iso(now), mine["pid"], now))
-        return _decide(conn, agent, "allow", "in_plan", "", node_id, mine["pid"])
+        return _decide(conn, repo, agent, "allow", "in_plan", "", node_id, mine["pid"])
     foreign = conn.execute(
         _OWNER_COLS + _ACTIVE_FROM + f"WHERE c.node_id IN ({marks}) AND c.mode='write' AND "
         + _ACTIVE_WHERE + "AND p.agent<>? ORDER BY p.ttl_expires DESC LIMIT 1",
         (*scope, now, agent)).fetchone()
     if foreign:
         owner = _conflict(foreign, "write-write")
-        return _decide(conn, agent, "deny", "foreign_claim", compose_foreign_claim(owner),
-                       node_id, owner["owner_plan_id"], owner)
+        return _decide(conn, repo, agent, "deny", "foreign_claim",
+                       compose_foreign_claim(owner), node_id, owner["owner_plan_id"], owner)
     ref = node_ref(*(conn.execute("SELECT path, qualname FROM nodes WHERE id=?",
                                   (node_id,)).fetchone() or ("", "")))
     held = conn.execute(
         "SELECT id, title FROM plans WHERE repo=? AND agent=? AND status='active' "
         "AND ttl_expires > ? ORDER BY updated DESC LIMIT 1", (repo, agent, now)).fetchone()
     if held:
-        return _decide(conn, agent, "deny", "out_of_scope",
+        return _decide(conn, repo, agent, "deny", "out_of_scope",
                        OUT_OF_SCOPE_TMPL.format(ref=ref, plan_id=held["id"], title=held["title"]),
                        node_id, held["id"])
-    return _decide(conn, agent, "deny", "no_plan", NO_PLAN_TMPL.format(agent=agent), node_id, None)
+    return _decide(conn, repo, agent, "deny", "no_plan", NO_PLAN_TMPL.format(agent=agent),
+                   node_id, None)
 
 
 def gate_decision(conn: sqlite3.Connection, *, repo: str, agent: str, path: str,
@@ -478,5 +479,5 @@ def gate_decision(conn: sqlite3.Connection, *, repo: str, agent: str, path: str,
             sweep(conn, repo, now)
     node_id, hint = resolve_gate_target(conn, repo, path, qualname)
     if node_id is None:
-        return _decide(conn, agent, "allow", hint, "", None, None)
+        return _decide(conn, repo, agent, "allow", hint, "", None, None)
     return check_node(conn, repo=repo, agent=agent, node_id=node_id, now=now)

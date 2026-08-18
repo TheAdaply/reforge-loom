@@ -74,9 +74,18 @@ CREATE TABLE IF NOT EXISTS events (
   ts     TEXT NOT NULL,                      -- ISO-8601 UTC
   actor  TEXT NOT NULL,
   action TEXT NOT NULL,                      -- declared|denied|allowed|released|expired|rescoped|renewed|bypass|indexed
-  detail TEXT NOT NULL DEFAULT ''
+  detail TEXT NOT NULL DEFAULT '',
+  repo   TEXT NOT NULL DEFAULT ''            -- MULTIREPO-SPEC §3 (D1); '' = pre-migration
+                                             -- history, shown in EVERY repo's feed.
 );
 """
+
+# MULTIREPO-SPEC §3 (D1). One server now serves many repo salts, so the audit feed has to
+# say WHICH repo an event belongs to — otherwise the dashboard shows every repo's traffic
+# at once. `nodes`/`plans` were repo-keyed from day one; `events` is the one table that
+# was not, so it is the one table that needs a migration. Guarded by PRAGMA table_info so
+# it is idempotent and so a fresh db (which gets the column from the DDL above) skips it.
+MIGRATIONS = (("events", "repo", "ALTER TABLE events ADD COLUMN repo TEXT NOT NULL DEFAULT ''"),)
 
 
 def connect(db_path: str) -> sqlite3.Connection:
@@ -95,10 +104,14 @@ def connect(db_path: str) -> sqlite3.Connection:
 
 
 def init_db(db_path: str) -> None:
-    """Create the schema (idempotent) and close the bootstrap connection."""
+    """Create the schema, apply `MIGRATIONS`, close the bootstrap connection. Idempotent."""
     con = connect(db_path)
     try:
         con.executescript(DDL)
+        for table, column, ddl in MIGRATIONS:
+            have = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
+            if column not in have:
+                con.execute(ddl)
     finally:
         con.close()
 
@@ -122,12 +135,17 @@ def immediate(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
 
 
 def log_event(
-    conn: sqlite3.Connection, actor: str, action: str, detail: str = ""
+    conn: sqlite3.Connection, actor: str, action: str, detail: str = "", repo: str = ""
 ) -> None:
-    """Append one audit row. Callers inside `immediate()` get it in the same tx."""
+    """Append one audit row. Callers inside `immediate()` get it in the same tx.
+
+    `repo` is ADDITIVE (MULTIREPO-SPEC §3) and defaults to '' so a caller that has no repo
+    in hand still writes a row — an event that reaches no feed would be worse than one
+    that reaches every feed, which is exactly how '' is read by `/state`.
+    """
     conn.execute(
-        "INSERT INTO events (ts, actor, action, detail) VALUES (?, ?, ?, ?)",
-        (iso(now_s()), actor, action, detail),
+        "INSERT INTO events (ts, actor, action, detail, repo) VALUES (?, ?, ?, ?, ?)",
+        (iso(now_s()), actor, action, detail, repo),
     )
 
 

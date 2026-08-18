@@ -25,7 +25,10 @@ from loom.server import claims
 from loom.server.db import immediate, now_s
 from loom.server.ids import split_ref
 
-_WRONG_REPO: dict[str, Any] = {"ok": False, "reason": "wrong_repo"}
+# MULTIREPO-SPEC §2: one server serves an ORDERED list of repo names. A tool argument of
+# `""` means "the default repo" — `served[0]` — which is what preserves single-repo
+# behavior verbatim. A non-empty name the server does not serve is the §5 error shape plus
+# an additive `served` list, so the caller can fix the argument without a second round trip.
 
 # A trailing file suffix (or an explicit `path::qual` ref) is what makes a `check` argument
 # a PATH — the only form §6's path ladder may judge, because a brand-new file legitimately
@@ -53,33 +56,44 @@ def _needs_resolution(node: str, candidates: list[str]) -> dict[str, Any]:
 
 
 def register(mcp: MCPServer, connection: Callable[[], sqlite3.Connection],
-             served: str) -> None:
-    """Define the §5 tool surface against the server's closed-over state (§5.11)."""
+             served: list[str]) -> None:
+    """Define the §5 tool surface against the server's closed-over state (§5.11).
 
-    def ok_repo(r: str) -> bool:
-        return not r or r == served
+    `served` is the ORDERED list of repo names this server serves (MULTIREPO-SPEC §2, D4);
+    `served[0]` is the default every `repo: str = ""` argument resolves to.
+    """
+    default = served[0]
+
+    def pick(r: str) -> str | None:
+        """'' -> the default repo; a served name -> itself; anything else -> None."""
+        if not r:
+            return default
+        return r if r in served else None
+
+    def unknown() -> dict[str, Any]:
+        return {"ok": False, "reason": "unknown_repo", "served": list(served)}
 
     @mcp.tool()
     def health() -> dict[str, Any]:
         """Liveness of the loom gate: served repo, indexed node count, active plan count."""
         conn = connection()
-        nodes, active = claims.counts(conn, served, now_s())
-        return {"ok": True, "repo": served, "nodes": nodes, "active_plans": active,
+        nodes, active = claims.counts(conn, default, now_s())
+        return {"ok": True, "repo": default, "nodes": nodes, "active_plans": active,
                 "version": __version__}
 
     @mcp.tool()
     def resolve_nodes(queries: list[str], repo: str = "") -> dict[str, Any]:
         """Resolve names, paths or refs to canonical node IDs. Ambiguity returns every candidate."""
         conn = connection()
-        if not ok_repo(repo):
-            return _WRONG_REPO
+        if (in_repo := pick(repo)) is None:
+            return unknown()
         resolved = []
         for q in queries:
             matches = [{"node_id": r["id"], "ref": claims.node_ref(r["path"], r["qualname"]),
                         "path": r["path"], "qualname": r["qualname"], "kind": r["kind"]}
-                       for r in claims.resolve_query(conn, served, q)]
+                       for r in claims.resolve_query(conn, in_repo, q)]
             resolved.append({"query": q, "matches": matches,
-                             "suggestions": [] if matches else claims.suggestions(conn, served, q)})
+                             "suggestions": [] if matches else claims.suggestions(conn, in_repo, q)})
         return {"ok": True, "resolved": resolved}
 
     @mcp.tool()
@@ -88,10 +102,10 @@ def register(mcp: MCPServer, connection: Callable[[], sqlite3.Connection],
                      ttl_s: int = 1800) -> dict[str, Any]:
         """Claim write targets (plus their one-hop CALLS neighbours) and read assumes under a spec."""
         conn = connection()
-        if not ok_repo(repo):
-            return _WRONG_REPO
+        if (in_repo := pick(repo)) is None:
+            return unknown()
         with immediate(conn):
-            return claims.declare_plan(conn, agent=agent, repo=served, branch=branch, title=title,
+            return claims.declare_plan(conn, agent=agent, repo=in_repo, branch=branch, title=title,
                                        spec_md=spec_md, write_targets=write_targets,
                                        assumes=assumes, ttl_s=ttl_s, now=now_s())
 
@@ -99,23 +113,23 @@ def register(mcp: MCPServer, connection: Callable[[], sqlite3.Connection],
     def check(agent: str, node: str, repo: str = "") -> dict[str, Any]:
         """Ask whether this agent may edit a node right now; same core as the edit-time gate."""
         conn = connection()
-        if not ok_repo(repo):
-            return _WRONG_REPO
+        if (in_repo := pick(repo)) is None:
+            return unknown()
         now = now_s()
-        if node.startswith("n-") and claims.node_exists(conn, served, node):
-            d = claims.check_node(conn, repo=served, agent=agent, node_id=node, now=now)
+        if node.startswith("n-") and claims.node_exists(conn, in_repo, node):
+            d = claims.check_node(conn, repo=in_repo, agent=agent, node_id=node, now=now)
         else:
-            rows = claims.resolve_query(conn, served, node)   # §5.2 ladder first (claimsx-F2)
+            rows = claims.resolve_query(conn, in_repo, node)   # §5.2 ladder first (claimsx-F2)
             if len(rows) == 1:
-                d = claims.check_node(conn, repo=served, agent=agent, node_id=rows[0]["id"],
+                d = claims.check_node(conn, repo=in_repo, agent=agent, node_id=rows[0]["id"],
                                       now=now)
             elif rows or not _path_like(node):
                 return _needs_resolution(
                     node, [claims.node_ref(r["path"], r["qualname"]) for r in rows]
-                    or claims.suggestions(conn, served, node))
+                    or claims.suggestions(conn, in_repo, node))
             else:
                 path, qual = split_ref(node)
-                d = claims.gate_decision(conn, repo=served, agent=agent, path=path,
+                d = claims.gate_decision(conn, repo=in_repo, agent=agent, path=path,
                                          qualname=qual or None, now=now)
         if d["decision"] == "allow":
             return {"allow": True, "case": d["case"], "plan_id": d["plan_id"]}
@@ -142,12 +156,12 @@ def register(mcp: MCPServer, connection: Callable[[], sqlite3.Connection],
     def list_claims(repo: str = "") -> dict[str, Any]:
         """List every active claim in this repo with its owner, plan and expiry."""
         conn = connection()
-        if not ok_repo(repo):
-            return _WRONG_REPO
+        if (in_repo := pick(repo)) is None:
+            return unknown()
         now = now_s()
         with immediate(conn):
-            claims.sweep(conn, served, now)
-        return {"ok": True, "claims": claims.active_claims(conn, served, now)}
+            claims.sweep(conn, in_repo, now)
+        return {"ok": True, "claims": claims.active_claims(conn, in_repo, now)}
 
     @mcp.tool()
     def renew(plan_id: str) -> dict[str, Any]:

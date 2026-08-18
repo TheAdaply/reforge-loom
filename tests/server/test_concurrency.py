@@ -151,7 +151,8 @@ def test_a_burst_of_concurrent_declares_never_raises_operational_error(live) -> 
 
 def test_the_plain_http_gate_and_health_routes_speak_the_frozen_wire(live) -> None:
     port, _ = live
-    assert post(port, "/health") == {"ok": True, "repo": "demo"}
+    # MULTIREPO-SPEC D2: `repos` is additive; `repo` stays served[0] for back-compat.
+    assert post(port, "/health") == {"ok": True, "repo": "demo", "repos": ["demo"]}
 
     url = f"http://127.0.0.1:{port}/mcp"
 

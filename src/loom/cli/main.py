@@ -58,7 +58,10 @@ def _no_empty(args: argparse.Namespace, *flags: str) -> None:
 
 
 def _repo_of(repo_root: str) -> str:
-    # Same rule as `server.app.main` — see the note there on why it is not shared.
+    # The `index` verb's default salt. Same basename rule `server.app.parse_repo_roots`
+    # applies to a bare `--repo-root PATH`, so `loom index` and `loom serve` land on the
+    # same name for the same checkout; serve reaches into the server for it, index keeps
+    # this one because it never parses the multi-root forms.
     return os.path.basename(repo_root.rstrip("/")) or "repo"
 
 
@@ -88,17 +91,24 @@ def _ref(row) -> str:
 
 
 def cmd_serve(args: argparse.Namespace) -> None:
-    from loom.server.app import serve
+    """MULTIREPO-SPEC §1: one server, one db, N repos — `--repo-root` is repeatable."""
+    from loom.server.app import parse_repo_roots, serve
 
-    repo_root = os.path.abspath(args.repo_root)
-    repo = args.repo or _repo_of(repo_root)
-    db = _db_of(args, repo_root)
+    try:
+        repos = parse_repo_roots(args.repo_root or [], args.repo or "")
+    except ValueError as exc:
+        _die(str(exc))
+    # With several roots the db lands beside the FIRST one unless --db says otherwise;
+    # docs recommend an explicit --db for multi-repo, since "the first root" is a rule an
+    # operator has to remember and a shared db is a thing a team wants to put on purpose.
+    db = _db_of(args, next(iter(repos.values())))
     # PLAN §4.5: `loom serve` starts server PLUS indexer — one process, no separate
-    # `loom index` step before first use. Incremental thereafter via mtime+hash.
-    stats = _index(db, repo, repo_root, changed_only=None)
-    print(f"loom: indexed {json.dumps(stats, default=str)}", flush=True)
-    # The repo salt is minted once, here, and echoed to every `loom init` (§11.19).
-    serve(args.host, args.port, db, repo)
+    # `loom index` step before first use. Incremental thereafter via mtime+hash, PER REPO.
+    for repo, repo_root in repos.items():
+        stats = _index(db, repo, repo_root, changed_only=None)
+        print(f"loom: indexed {json.dumps({'repo': repo, **stats}, default=str)}", flush=True)
+    # The repo salts are minted once, here, and echoed to every `loom init` (§11.19).
+    serve(args.host, args.port, db, repos)
 
 
 def _index(db: str, repo: str, repo_root: str, changed_only: bool | None) -> dict:
@@ -109,7 +119,10 @@ def _index(db: str, repo: str, repo_root: str, changed_only: bool | None) -> dic
     init_db(db)
     conn = connect(db)
     if changed_only is None:
-        changed_only = conn.execute("SELECT 1 FROM nodes LIMIT 1").fetchone() is not None
+        # Scoped to THIS repo: with one db behind several repos, "warm" has to mean
+        # "warm for this salt", or a second repo's first index would run incremental.
+        changed_only = conn.execute("SELECT 1 FROM nodes WHERE repo=? LIMIT 1",
+                                    (repo,)).fetchone() is not None
     stats = index_repo(conn, repo, repo_root, changed_only=changed_only)
     conn.close()
     return stats
@@ -124,16 +137,34 @@ def cmd_index(args: argparse.Namespace) -> None:
     print(json.dumps({"repo": repo, **stats}, default=str))
 
 
-def _health(server: str) -> str:
-    """Ping `GET /health` for the repo salt — one spelling, minted at serve (§11.19)."""
+def _health(server: str) -> list[str]:
+    """Ping `GET /health` for the served repo salts — one spelling, minted at serve (§11.19).
+
+    Reads the multi-repo `repos` list, falling back to the single `repo` key so a checkout
+    initialized against an OLDER server (or any of the frozen test stubs) still works.
+    """
     try:
         with urllib.request.urlopen(server.rstrip("/") + "/health", timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except Exception as exc:
         _die(f"cannot reach {server}/health ({type(exc).__name__}); is `loom serve` running?")
-    if not data.get("ok") or not data.get("repo"):
+    served = [str(r) for r in (data.get("repos") or [])] or \
+        ([str(data["repo"])] if data.get("repo") else [])
+    if not data.get("ok") or not served:
         _die(f"{server}/health did not name a repo; refusing to guess the id salt")
-    return str(data["repo"])
+    return served
+
+
+def _pick_repo(server: str, asked: str | None, served: list[str]) -> str:
+    """§1: one served repo -> the name is optional; many -> it is required, listed verbatim."""
+    if asked:
+        if asked not in served:
+            _die(f"{server} does not serve repo '{asked}'; it serves: {', '.join(served)}")
+        return asked
+    if len(served) == 1:
+        return served[0]
+    _die(f"{server} serves several repos; pass --repo NAME with one of: {', '.join(served)}")
+    raise AssertionError                                   # pragma: no cover — _die exits
 
 
 def _merge_settings(repo_root: str, gate: str) -> int:
@@ -210,12 +241,12 @@ def _write_config(path: str, server: str, agent: str, repo: str, repo_root: str)
 
 
 def cmd_init(args: argparse.Namespace) -> None:
-    _no_empty(args, "server", "agent")
+    _no_empty(args, "server", "agent", "repo")
     repo_root = os.path.abspath(args.repo_root) if args.repo_root else os.getcwd()
     gate = shutil.which("loom-gate")
     if not gate:
         _die("`loom-gate` is not on PATH; install loom (uv sync) and re-run loom init")
-    repo = _health(args.server)
+    repo = _pick_repo(args.server, args.repo, _health(args.server))
     agent = args.agent or os.environ.get("USER") or "agent"
     home = os.path.expanduser("~/.loom")
     # PER-REPO config alongside the settings.json this verb already writes: the ONE global
@@ -299,7 +330,8 @@ def cmd_release(args: argparse.Namespace) -> None:
     conn = connect(_existing_db_of(args))
     stamp, err, freed = iso(now_s()), "", 0
     with immediate(conn):
-        plan = conn.execute("SELECT agent, status FROM plans WHERE id = ?", (args.plan_id,)).fetchone()
+        plan = conn.execute("SELECT agent, repo, status FROM plans WHERE id = ?",
+                            (args.plan_id,)).fetchone()
         if plan is None:
             err = "unknown_plan"
         elif plan["agent"] != args.agent:
@@ -311,7 +343,7 @@ def cmd_release(args: argparse.Namespace) -> None:
                                  "IS NULL", (stamp, args.plan_id)).rowcount
             conn.execute("UPDATE plans SET status = 'done', updated = ? WHERE id = ?",
                          (stamp, args.plan_id))
-            log_event(conn, args.agent, "released", args.plan_id)
+            log_event(conn, args.agent, "released", args.plan_id, plan["repo"])
     conn.close()
     if err:
         _die(err)
@@ -320,11 +352,14 @@ def cmd_release(args: argparse.Namespace) -> None:
 
 VERBS = {
     "serve": (cmd_serve, "run the loom MCP + /gate server",
-              [("--repo-root", {"required": True}), ("--repo", {"default": ""}),
+              [("--repo-root", {"required": True, "action": "append",
+                                "help": "PATH or NAME=PATH; repeat for several repos"}),
+               ("--repo", {"default": "", "help": "rename the single repo of a one-root server"}),
                ("--host", {"default": "0.0.0.0"}), ("--port", {"type": int, "default": 8790}),
-               ("--db", {})]),
+               ("--db", {"help": "recommended when serving several repos"})]),
     "init": (cmd_init, "register the PreToolUse gate in this repo",
              [("--server", {"required": True}), ("--agent", {}),
+              ("--repo", {"help": "required when the server serves several repos"}),
               ("--repo-root", {"help": "defaults to the current directory"})]),
     "index": (cmd_index, "index a repo into the loom graph",
               [("--repo-root", {"required": True}), ("--repo", {"default": ""}), ("--db", {}),
