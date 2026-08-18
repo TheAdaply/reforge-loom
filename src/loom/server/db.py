@@ -1,0 +1,141 @@
+"""Frozen artifact — BUILD-SPEC §2. SQLite schema, connection pragmas, transaction law.
+
+ALL SQL for loom's storage lives in `db.py` / `claims.py` (never inline elsewhere) so the
+v2 Postgres flip is a localized rewrite (§11.11). stdlib `sqlite3` only — no SQLAlchemy.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from time import time
+
+DDL = """
+CREATE TABLE IF NOT EXISTS nodes (
+  id         TEXT PRIMARY KEY,               -- "n-" + 8 base36 chars, §3
+  repo       TEXT NOT NULL,
+  path       TEXT NOT NULL,                  -- repo-root-relative, POSIX separators
+  qualname   TEXT NOT NULL DEFAULT '',       -- '' = file-level node; else 'Class/method' (§4)
+  kind       TEXT NOT NULL,                  -- 'File' | 'Class' | 'Function'
+  body_hash  TEXT NOT NULL DEFAULT '',       -- sha256 hex of node source (file content for File)
+  sig_hash   TEXT NOT NULL DEFAULT '',       -- sha256 hex of def/class header line(s); v2 impact needs it, add NOW (papers 5.3)
+  start_line INTEGER,                        -- 1-based, non-identifying (locator aid)
+  end_line   INTEGER,
+  updated    TEXT NOT NULL,                  -- ISO-8601 UTC
+  UNIQUE (repo, path, qualname)
+);
+CREATE INDEX IF NOT EXISTS idx_nodes_repo_qualname ON nodes(repo, qualname);
+CREATE INDEX IF NOT EXISTS idx_nodes_repo_path     ON nodes(repo, path);
+
+CREATE TABLE IF NOT EXISTS edges (
+  src  TEXT NOT NULL,
+  dst  TEXT NOT NULL,
+  kind TEXT NOT NULL,                        -- 'CALLS' | 'IMPORTS' | 'CONTAINS'; plain TEXT, NO
+                                             -- CHECK constraint (v2 adds EXTENDS/USES without a
+                                             -- migration — papers 5.1). CONTAINS is canonical,
+                                             -- never DEFINES (falkordb C3).
+                                             -- Direction (frozen, GATE-2 edit 7):
+                                             --   CALLS    src = caller node,          dst = callee node
+                                             --   IMPORTS  src = importing File node,  dst = imported File node
+                                             --   CONTAINS src = container (File|Class), dst = contained (Class|Function)
+  PRIMARY KEY (src, dst, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst, kind);
+
+CREATE TABLE IF NOT EXISTS plans (
+  id          TEXT PRIMARY KEY,              -- "lm-" + >=6 base36 chars, §3
+  agent       TEXT NOT NULL,
+  repo        TEXT NOT NULL,
+  branch      TEXT NOT NULL DEFAULT '',
+  title       TEXT NOT NULL,
+  spec_md     TEXT NOT NULL,
+  status      TEXT NOT NULL DEFAULT 'active',-- 'active' | 'done' | 'expired' | 'superseded'
+  created     TEXT NOT NULL,                 -- ISO-8601 UTC
+  updated     TEXT NOT NULL,
+  ttl_expires REAL NOT NULL                  -- unix seconds UTC (float)
+);
+CREATE INDEX IF NOT EXISTS idx_plans_repo_status  ON plans(repo, status);
+CREATE INDEX IF NOT EXISTS idx_plans_agent_status ON plans(agent, status);
+
+CREATE TABLE IF NOT EXISTS claims (
+  node_id  TEXT NOT NULL,
+  plan_id  TEXT NOT NULL,
+  mode     TEXT NOT NULL,                    -- 'write' | 'read'
+  created  TEXT NOT NULL,
+  released TEXT,                             -- tombstone, never DELETE (agent-mail §2.1)
+  PRIMARY KEY (node_id, plan_id, mode)
+);
+CREATE INDEX IF NOT EXISTS idx_claims_node ON claims(node_id, released);
+CREATE INDEX IF NOT EXISTS idx_claims_plan ON claims(plan_id, released);
+
+CREATE TABLE IF NOT EXISTS events (
+  ts     TEXT NOT NULL,                      -- ISO-8601 UTC
+  actor  TEXT NOT NULL,
+  action TEXT NOT NULL,                      -- declared|denied|allowed|released|expired|rescoped|renewed|bypass|indexed
+  detail TEXT NOT NULL DEFAULT ''
+);
+"""
+
+
+def connect(db_path: str) -> sqlite3.Connection:
+    """Open a connection with EVERY pragma of §2 set (none are optional).
+
+    `isolation_level=None` puts the driver in autocommit so `immediate()`'s explicit
+    BEGIN IMMEDIATE / COMMIT is the ONLY transaction control (transaction law, §2).
+    """
+    con = sqlite3.connect(db_path, check_same_thread=False, isolation_level=None)
+    con.execute("PRAGMA journal_mode=WAL")      # persists in the file; harmless to repeat
+    con.execute("PRAGMA busy_timeout=5000")     # REQUIRED: losers of a write race must queue, not error
+    con.execute("PRAGMA foreign_keys=ON")
+    con.execute("PRAGMA synchronous=NORMAL")    # correct pairing with WAL
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def init_db(db_path: str) -> None:
+    """Create the schema (idempotent) and close the bootstrap connection."""
+    con = connect(db_path)
+    try:
+        con.executescript(DDL)
+    finally:
+        con.close()
+
+
+@contextmanager
+def immediate(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    """BEGIN IMMEDIATE / COMMIT, ROLLBACK on raise.
+
+    The write lock is taken BEFORE the first read, so every read->judge->write cycle
+    (`declare_plan`, `rescope`, `renew`, `release`, plan-ID minting, the sweep) is one
+    atomic check-then-act. There is no `threading.Lock` anywhere in the server.
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield conn
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.execute("COMMIT")
+
+
+def log_event(
+    conn: sqlite3.Connection, actor: str, action: str, detail: str = ""
+) -> None:
+    """Append one audit row. Callers inside `immediate()` get it in the same tx."""
+    conn.execute(
+        "INSERT INTO events (ts, actor, action, detail) VALUES (?, ?, ?, ?)",
+        (iso(now_s()), actor, action, detail),
+    )
+
+
+def now_s() -> float:
+    """Unix seconds UTC (float) — the storage form for `plans.ttl_expires`."""
+    return time()
+
+
+def iso(ts: float) -> str:
+    """ISO-8601 UTC with a literal `Z` suffix (§5 timestamp convention)."""
+    return datetime.fromtimestamp(ts, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
