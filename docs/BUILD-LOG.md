@@ -45,3 +45,14 @@
   by bob's own smoke test. Product finding fixed same-hour (ace3cc0): init now gitignores the
   per-user loom.toml — alice's `git add -A` had committed her identity file and bob had to stash
   around it. 302 tests. Screenshot: docs/dashboard-two-users.png.
+- 2026-08-19 Competitor recon (12 agents, 2 workflows): graphify (107k★, YC S26, organic) =
+  complement+reposition — zero coordination in 61k LOC, hook surfaces provably disjoint (they gate
+  reads, we gate writes); Graft = complement on mechanism ("the agent did not pull. It grepped 38
+  times." — their own source); graphiti = pattern mine only (Zep CLA assigns patents — never
+  upstream). Report: research/competitor-recon.md, 12/12 claims adversarially re-verified.
+- 2026-08-19 Recon fixes landed (2a5332b, 316 tests): U1 cold≡incremental edge resolution — the
+  edge-decay false-ALLOW caveat is FIXED and its docstring deleted (identity test pins it
+  forever); U2 staleness-is-a-verdict (/state index_age + dashboard note + doctor WARN); U3
+  entropy-gated fuzzy resolve (short/ambiguous tails refuse with suggestions; exact and
+  '/'-boundary rungs untouched). Patterns re-implemented, license-clean, THIRD_PARTY_NOTICES
+  updated. Follow-up (non-blocking): per-item extraction stubs for graft/graphiti.
