@@ -1,0 +1,13 @@
+{
+  "session_id": "sess-0001",
+  "transcript_path": "/dev/null",
+  "cwd": "__REPO_ROOT__",
+  "hook_event_name": "PreToolUse",
+  "permission_mode": "default",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "__REPO_ROOT__/src/app.py",
+    "old_string": "        token = _mint(email)",
+    "new_string": "        token = _mint(email.lower())"
+  }
+}

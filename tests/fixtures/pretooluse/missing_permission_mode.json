@@ -1,0 +1,12 @@
+{
+  "session_id": "sess-0001",
+  "transcript_path": "/dev/null",
+  "cwd": "__REPO_ROOT__",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "__REPO_ROOT__/src/app.py",
+    "old_string": "    return 1",
+    "new_string": "    return 2"
+  }
+}

@@ -1,23 +1,26 @@
-"""M0 skeleton — BUILD-SPEC §5.11. MCPServer construction, `health`, `GET /health`.
+"""BUILD-SPEC §5.11 / §6 — MCPServer construction, `GET /health`, `POST /gate`.
 
-M2 extends this file in place: `POST /gate` and the nine §5 tools via
-`loom.server.tools.register(mcp, state)`. State (db path, repo, repo_root, the one
-long-lived connection) is built in `build_server` and closed over — no env-var
-singletons (specgate §3.6).
+The nine §5 tools live in `loom.server.tools` and are registered here. State (db path,
+repo, repo_root, the one long-lived connection) is built in `build_server` and closed
+over — no env-var singletons (specgate §3.6). The hook speaks ONLY `POST /gate` on this
+same port, never MCP (§11.14).
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-from typing import Any
+import sqlite3
+import threading
+from collections.abc import Callable
 
 from mcp.server import MCPServer
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from loom import __version__
+from loom.server.claims import gate_decision
 from loom.server.db import connect, init_db, now_s
+from loom.server.tools import register
 
 # The CLAUDE.snippet protocol text (§8.2), verbatim — free pull-through for agents
 # whose CLAUDE.md drifted (specgate §2.1).
@@ -43,10 +46,33 @@ your plan is gone, re-declare — do not edit around a deny.
 """
 
 
+def connection_factory(db_path: str) -> Callable[[], sqlite3.Connection]:
+    """One long-lived connection PER THREAD, opened once and reused (specgate §3.2).
+
+    The SDK runs every sync `@mcp.tool()` through `anyio.to_thread.run_sync`, so tool bodies
+    execute concurrently in worker threads and CANNOT share one `sqlite3.Connection`: the
+    second `BEGIN IMMEDIATE` raises "cannot start a transaction within a transaction", and
+    worse, two threads' statements would interleave inside one transaction. Per-thread
+    connections restore §2's law as written — SQLite's write lock serializes the racers,
+    `busy_timeout=5000` makes the loser queue — with no Python lock and no per-call
+    connect/close (which would blow the check budget). `threading.local` is a slot, not a
+    lock; nothing here ever blocks a thread in Python.
+    """
+    local = threading.local()
+
+    def get() -> sqlite3.Connection:
+        conn = getattr(local, "conn", None)
+        if conn is None:
+            conn = local.conn = connect(db_path)
+        return conn
+
+    return get
+
+
 def build_server(db_path: str, repo: str, repo_root: str) -> MCPServer:
-    """Create the schema if needed, open the process-lifetime connection, wire tools."""
+    """Create the schema if needed, wire the per-thread connection factory and the tools."""
     init_db(db_path)
-    conn = connect(db_path)
+    conn = connection_factory(db_path)
 
     mcp = MCPServer(
         "loom",
@@ -55,29 +81,27 @@ def build_server(db_path: str, repo: str, repo_root: str) -> MCPServer:
         version="0.1.0",
     )
 
-    @mcp.tool()
-    def health() -> dict[str, Any]:
-        """Liveness and size of the served repo's graph: node count and active plan count."""
-        nodes = conn.execute(
-            "SELECT COUNT(*) AS c FROM nodes WHERE repo = ?", (repo,)
-        ).fetchone()["c"]
-        active_plans = conn.execute(
-            "SELECT COUNT(*) AS c FROM plans "
-            "WHERE repo = ? AND status = 'active' AND ttl_expires > ?",
-            (repo, now_s()),
-        ).fetchone()["c"]
-        return {
-            "ok": True,
-            "repo": repo,
-            "nodes": nodes,
-            "active_plans": active_plans,
-            "version": __version__,
-        }
+    register(mcp, {"conn": conn, "repo": repo, "repo_root": repo_root, "db_path": db_path})
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health_route(request: Request) -> Response:
         """Plain-HTTP liveness used by `loom init` to learn the repo salt (§11.19)."""
         return JSONResponse({"ok": True, "repo": repo})
+
+    @mcp.custom_route("/gate", methods=["POST"])
+    async def gate_route(request: Request) -> Response:
+        """§6 wire contract. Always HTTP 200 with exactly the five frozen keys."""
+        body = await request.json()
+        asked = str(body.get("repo") or "")
+        if asked and asked != repo:
+            # Advisory posture: a repo we do not serve is never bricked (§6 case 2 spirit).
+            return JSONResponse({"decision": "allow", "case": "unindexed", "message": "",
+                                 "node_id": None, "plan_id": None})
+        d = gate_decision(conn(), repo=repo, agent=str(body.get("agent") or ""),
+                          path=str(body.get("path") or ""), qualname=body.get("qualname"),
+                          now=now_s())
+        return JSONResponse({k: d[k] for k in
+                             ("decision", "case", "message", "node_id", "plan_id")})
 
     return mcp
 

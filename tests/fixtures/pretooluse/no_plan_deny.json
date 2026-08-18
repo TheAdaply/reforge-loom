@@ -1,0 +1,12 @@
+{
+  "session_id": "sess-0001",
+  "transcript_path": "/dev/null",
+  "cwd": "__REPO_ROOT__",
+  "hook_event_name": "PreToolUse",
+  "permission_mode": "default",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "__REPO_ROOT__/src/app.py",
+    "content": "# rewritten\n"
+  }
+}

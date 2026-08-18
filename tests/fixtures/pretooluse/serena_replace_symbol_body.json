@@ -1,0 +1,13 @@
+{
+  "session_id": "sess-0001",
+  "transcript_path": "/dev/null",
+  "cwd": "__REPO_ROOT__",
+  "hook_event_name": "PreToolUse",
+  "permission_mode": "default",
+  "tool_name": "mcp__serena__replace_symbol_body",
+  "tool_input": {
+    "relative_path": "src/app.py",
+    "name_path": "/AuthService/authenticate",
+    "body": "    def authenticate(self, email, password):\n        return None\n"
+  }
+}

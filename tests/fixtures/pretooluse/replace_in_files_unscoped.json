@@ -1,0 +1,14 @@
+{
+  "session_id": "sess-0001",
+  "transcript_path": "/dev/null",
+  "cwd": "__REPO_ROOT__",
+  "hook_event_name": "PreToolUse",
+  "permission_mode": "default",
+  "tool_name": "mcp__serena__replace_in_files",
+  "tool_input": {
+    "relative_path": "",
+    "pattern": "token",
+    "replacement": "tok",
+    "dry_run": false
+  }
+}
