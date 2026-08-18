@@ -115,7 +115,7 @@ def home(tmp_path: Path) -> str:
 def configure(home: str) -> Callable[..., None]:
     """Write `~/.loom/config.toml` into the isolated HOME."""
 
-    def _write(server_url: str, repo_root_dir: str, agent: str = "akash-mbp") -> None:
+    def _write(server_url: str, repo_root_dir: str, agent: str = "agent-a") -> None:
         Path(home, ".loom", "config.toml").write_text(
             f'server_url = "{server_url}"\nagent = "{agent}"\nrepo = "demo"\n'
             f'repo_root = "{repo_root_dir}"\n',

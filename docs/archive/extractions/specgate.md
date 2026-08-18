@@ -1,6 +1,6 @@
 # Extraction: specgate (our own prior MVP)
 
-Source clone: `/Users/cero/Desktop/PROJECTS/reforge-workspace/re-forge-irl-data-team-collab/specgate`
+Source clone: `<specgate-clone>`
 (verified working 2026-08-14; `mcp==2.0.0` pinned in its `uv.lock`).
 Target: `loom/` per `loom/docs/PLAN-v1.md`.
 
@@ -17,7 +17,7 @@ Authorship, from `specgate/pyproject.toml:6-8`:
 
 ```toml
 authors = [
-    { name = "Akash", email = "drakathakash@gmail.com" }
+    { name = "<author>" }
 ]
 ```
 
@@ -356,7 +356,7 @@ version = "0.1.0"
 description = "Spec-gated collaboration server: coding agents on different machines declare function-level specs before editing a shared repo; conflicts are caught at spec time, not merge time."
 readme = "README.md"
 authors = [
-    { name = "Akash", email = "drakathakash@gmail.com" }
+    { name = "<author>" }
 ]
 requires-python = ">=3.12"
 dependencies = [

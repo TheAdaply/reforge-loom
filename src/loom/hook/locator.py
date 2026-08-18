@@ -1,7 +1,8 @@
 """M3 — BUILD-SPEC §7.2/§7.4: the PreToolUse edit locator. stdlib `ast` ONLY.
 
 Hook input-parsing patterns derived from Serena (https://github.com/oraios/serena), MIT
-License, Copyright (c) 2025 Oraios AI. See THIRD_PARTY_NOTICES.md. Imports are stdlib +
+License, Copyright (c) 2025 Oraios AI. Full license:
+third_party/LICENSES/serena-MIT.txt. See THIRD_PARTY_NOTICES.md. Imports are stdlib +
 `loom.indexer.naming` (§9.2) — never `loom.server.*`, never `mcp`: tree-sitter and the MCP
 SDK live on the server side, so a PreToolUse process pays only the interpreter start.
 """
@@ -12,7 +13,8 @@ import ast
 import os
 from dataclasses import dataclass
 
-from loom.indexer.naming import norm_path, qualname as join_qualname
+from loom.indexer.naming import norm_path
+from loom.indexer.naming import qualname as join_qualname
 
 # The ONE hook-local deny template (§7.4, GATE-2 edit 3) — the server never emits it.
 UNSCOPED_TMPL = (

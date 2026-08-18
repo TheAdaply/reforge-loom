@@ -4,12 +4,12 @@ Sources of truth for this document:
 
 1. **Official docs, verified 2026-08-18.** `https://code.claude.com/docs/en/hooks` — fetched as raw
    markdown from `https://code.claude.com/docs/en/hooks.md` (273,639 bytes) and saved locally at
-   `/private/tmp/claude-501/-Users-cero-Desktop-PROJECTS-reforge-workspace-re-forge-irl-data-team-collab/6458dacd-1b63-4e60-82c7-dac1ea52eb51/scratchpad/hooks-ref.md`.
+   `<scratchpad>/hooks-ref.md`.
    **All `hooks-ref.md:NNN` line numbers below are into that saved copy.** Section anchors are given
    too so they survive a re-fetch. `https://code.claude.com/docs/en/hooks-guide` also exists
    ("Automate actions with hooks") but is a quickstart; every normative statement below comes from
    the reference page.
-2. **Clone:** `/private/tmp/claude-501/.../scratchpad/vendor/claude-code-permissions-hook`
+2. **Clone:** `<vendor-clone>/claude-code-permissions-hook`
    (github.com/kornysietsma/claude-code-permissions-hook, HEAD `ca0dca0`, pushed 2025-12-06).
 
 Do not use the prose summary of the doc that a fetch-and-summarize returns; it silently drops the

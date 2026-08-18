@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlite3
 
 import pytest
-
 from conftest import REPO, SPEC, nid
+
 from loom.server import claims
 from loom.server.db import immediate, iso, now_s
 
@@ -22,6 +22,7 @@ LOGIN = "svc.py::login"
 HASH = "util.py::hash_pw"
 USER = "models.py::User"
 LONELY = "iso.py::lonely"
+UNRELATED = "svc.py::unrelated"
 
 
 def declare(conn: sqlite3.Connection, agent: str, targets: list[str],
@@ -129,8 +130,30 @@ def test_contains_closure_walks_both_directions_transitively(gconn: sqlite3.Conn
     up = claims.contains_closure(gconn, REPO, {nid(AUTH)}, down=False)
     assert up == {nid(AUTH), nid("svc.py::AuthService"), nid("svc.py")}
     down = claims.contains_closure(gconn, REPO, {nid("svc.py")}, up=False)
-    assert down == {nid("svc.py"), nid("svc.py::AuthService"), nid(AUTH), nid(LOGIN)}
+    assert down == {nid("svc.py"), nid("svc.py::AuthService"), nid(AUTH), nid(LOGIN),
+                nid(UNRELATED)}
     assert claims.contains_closure(gconn, REPO, {nid(LONELY)}) == {nid(LONELY), nid("iso.py")}
+
+
+def test_conflict_scope_is_ancestors_and_contained_never_siblings(
+        gconn: sqlite3.Connection) -> None:
+    """loom is function-level or it is nothing. `login` and `unrelated` share only a file
+    with `authenticate`; neither may enter its conflict scope."""
+    scope = claims._scope_for_conflicts(gconn, REPO, {nid(AUTH)})
+    assert scope == {nid(AUTH), nid("svc.py::AuthService"), nid("svc.py")}
+    assert nid(LOGIN) not in scope and nid(UNRELATED) not in scope
+    # A file claim still reaches everything inside it.
+    assert claims._scope_for_conflicts(gconn, REPO, {nid("svc.py")}) == {
+        nid("svc.py"), nid("svc.py::AuthService"), nid(AUTH), nid(LOGIN), nid(UNRELATED)}
+
+
+def test_two_agents_may_claim_two_unrelated_symbols_in_one_file(
+        gconn: sqlite3.Connection) -> None:
+    """The headline promise: sharing a file is not a collision. `unrelated` neither calls
+    nor is called by `authenticate`, so only the CONTAINS pivot could make them contend."""
+    assert declare(gconn, "aria", [AUTH])["ok"] is True
+    got = declare(gconn, "bo", [UNRELATED])
+    assert got["ok"] is True, got
 
 
 # --------------------------------------------------------------------- conflicts

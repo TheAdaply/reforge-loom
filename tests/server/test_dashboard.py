@@ -98,7 +98,9 @@ def test_the_fixture_repo_is_below_the_focus_threshold_and_untruncated(live_serv
     assert "const FOCUS_FILE_THRESHOLD = 12;" in page                  # threshold frozen at 12
     assert "const BEAD_CAP = 14;" in page                              # 14 beads per thread
     assert "files with active claims surface automatically" in page    # exact scope-note copy
-    assert "graph truncated to first 600 nodes" in page                # exact §2 copy
+    assert "graph truncated — showing " in page                        # §2 copy, cap not hardcoded
+    assert "truncated to first 600" not in page        # the cap is read from /state, not typed
+    assert "A hollow bead is unclaimed." in page                       # the static legend
     assert "index behind working tree" in page                         # exact U2 copy
     assert "loom index --changed refreshes" in page                    # ...naming its own fix
     assert 'id="nNodes"' in page                                       # the totals-fed tile

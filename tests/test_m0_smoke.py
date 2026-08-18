@@ -50,10 +50,9 @@ def test_immediate_commits_and_rolls_back(conn: sqlite3.Connection) -> None:
         log_event(conn, "aria", "declared", "lm-1")
     assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
 
-    with pytest.raises(ValueError):
-        with immediate(conn):
-            log_event(conn, "aria", "denied", "lm-2")
-            raise ValueError("boom")
+    with pytest.raises(ValueError), immediate(conn):
+        log_event(conn, "aria", "denied", "lm-2")
+        raise ValueError("boom")
     assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
 
 

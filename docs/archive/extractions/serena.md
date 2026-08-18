@@ -1,6 +1,6 @@
 # Extraction: Serena (github.com/oraios/serena)
 
-Source clone: `/private/tmp/claude-501/-Users-cero-Desktop-PROJECTS-reforge-workspace-re-forge-irl-data-team-collab/6458dacd-1b63-4e60-82c7-dac1ea52eb51/scratchpad/vendor/serena`
+Source clone: `<vendor-clone>/serena`
 Version in clone: `serena-agent` 1.7.1.dev0 (`pyproject.toml:6-7`).
 All `file:line` references below are relative to `<clone>/`.
 

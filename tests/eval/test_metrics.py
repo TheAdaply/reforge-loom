@@ -73,7 +73,7 @@ def test_near_identical_hunks_above_the_threshold_still_count_as_duplicate() -> 
     assert compute_metrics(a, b, [])["dup_lines"] == 0
 
     b2 = [hunk("svc.py", 1, ["x = 1", "y = 2", "z = 3", "w = 4", "v = 5"])]
-    assert 4 / 5 >= DUP_JACCARD
+    assert DUP_JACCARD <= 4 / 5
     assert compute_metrics(a, b2, [])["dup_lines"] == 4
 
 

@@ -49,7 +49,7 @@ def test_init_merges_into_existing_hooks_and_is_idempotent(
     settings.parent.mkdir(parents=True)
     settings.write_text(json.dumps({"hooks": {"PreToolUse": [USER_GROUP]}}), encoding="utf-8")
 
-    run_cli(monkeypatch, "init", "--server", stub.url, "--agent", "akash-mbp", "--repo-root", repo_root)
+    run_cli(monkeypatch, "init", "--server", stub.url, "--agent", "agent-a", "--repo-root", repo_root)
     groups = read_settings(repo_root)["hooks"]["PreToolUse"]
     assert groups[0] == USER_GROUP  # the user's own hook survives untouched
     assert [g["matcher"] for g in groups[1:]] == list(MATCHERS)
@@ -249,6 +249,7 @@ def test_ls_missing_db_dies_cleanly(tmp_path, capsys, monkeypatch):
 def test_serve_indexes_at_boot(tmp_path, monkeypatch, capsys):
     """PLAN §4.5: `loom serve` = server plus indexer, one process (orchestrator fix)."""
     import sqlite3
+
     import loom.server.app as app_mod
 
     fixture = os.path.join(os.path.dirname(__file__), "..", "fixtures", "pyrepo")
@@ -265,6 +266,7 @@ def test_serve_indexes_at_boot(tmp_path, monkeypatch, capsys):
 def test_init_registers_mcp_server(tmp_path, monkeypatch):
     """Red-team fix: without .mcp.json agents are TOLD to declare_plan but CANNOT call it."""
     import json as _json
+
     from loom.cli import main as cli_mod
 
     repo_root = tmp_path / "repo"
@@ -352,9 +354,12 @@ def test_init_for_a_second_repo_does_not_disarm_the_first(
         cfg_b = Path(roots[1], ".claude", "loom.toml").read_text(encoding="utf-8")
         assert f'server_url = "{first.url}"' in cfg_a and 'repo = "alpha-salt"' in cfg_a
         assert f'server_url = "{second.url}"' in cfg_b and 'repo = "beta-salt"' in cfg_b
-        # 2. the global slot still exists (backward compat) and holds the LAST init
+        # 2. the global slot still exists (backward compat) and holds the FIRST init: a
+        #    later init must not repoint the fallback, which is the stale-global bug the
+        #    per-repo file was introduced to fix.
         global_cfg = Path(home, ".loom", "config.toml").read_text(encoding="utf-8")
-        assert f'server_url = "{second.url}"' in global_cfg
+        assert f'server_url = "{first.url}"' in global_cfg
+        assert second.url not in global_cfg
 
         # 3. the real hook, editing in repo A AFTER repo B was initialized
         payload = json.dumps({

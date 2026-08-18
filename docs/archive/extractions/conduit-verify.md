@@ -1,6 +1,6 @@
 # conduit-verify — Akasxh/conduit as loom eval target
 
-Source clone: `/private/tmp/claude-501/-Users-cero-Desktop-PROJECTS-reforge-workspace-re-forge-irl-data-team-collab/6458dacd-1b63-4e60-82c7-dac1ea52eb51/scratchpad/vendor/conduit`
+Source clone: `<vendor-clone>/conduit`
 Remote: `https://github.com/Akasxh/conduit.git` · single commit `04ce2ec "Conduit — AI-assisted API integration engine"`
 
 **Headline: this is NOT a RealWorld/Conduit implementation.** The name collides; the software does not.
@@ -28,7 +28,7 @@ as a submodule in a public loom repo.
 **Why this is nonetheless acceptable for our use:**
 1. We use it as an **eval target repo** — agents *edit* it in throwaway worktrees; zero conduit code
    is copied into `loom/`. Nothing in this doc's ADOPT section is conduit source.
-2. The GitHub owner is `Akasxh`, i.e. this workspace's own user (`drakathakash@gmail.com`,
+2. The GitHub owner is `Akasxh`, i.e. the loom author's own account (
    Akash). Consent is presumably available. **Action item: add an explicit MIT LICENSE to
    Akasxh/conduit before any public loom demo or submodule reference.** Until that lands, keep the
    eval target as a local clone path in config, not a git submodule in a published repo.
@@ -63,7 +63,6 @@ exactly what PLAN §6 needs from a target, independent of whether it is RealWorl
 Setup (venv lives inside the clone under scratchpad, never global):
 
 ```
-cd /Users/cero
 uv sync --directory <CLONE> --extra dev          # resolved clean, no manual pinning needed
 uv run --directory <CLONE> pytest -q -p no:cacheprovider --no-cov
 ```

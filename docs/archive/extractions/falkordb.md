@@ -1,6 +1,6 @@
 # Extraction: FalkorDB code-graph → loom `indexer/`
 
-Source clone: `/private/tmp/claude-501/-Users-cero-Desktop-PROJECTS-reforge-workspace-re-forge-irl-data-team-collab/6458dacd-1b63-4e60-82c7-dac1ea52eb51/scratchpad/vendor/code-graph`
+Source clone: `<vendor-clone>/code-graph`
 (package `falkordb-code-graph` v0.4.2, `pyproject.toml:1-4`).
 All file:line references below are relative to that clone root.
 

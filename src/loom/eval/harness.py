@@ -104,12 +104,14 @@ def _drain(stream, sink: list[str]) -> None:
     stream.close()
 
 
-def run_server(db: str, repo_root: str, port: int) -> subprocess.Popen:
-    """The real server as a subprocess, logs to PIPE (never devnull — specgate §2.6).
+def run_server(db: str, repo_root: str, port: int) -> tuple[subprocess.Popen, list[str]]:
+    """The real server as a subprocess, plus its live log buffer. Logs to PIPE (never
+    devnull — specgate §2.6).
 
-    The caller owns the try/finally terminate. `LOOM_ARM` is scrubbed from the child's
-    environment: a stray `claims_only` would blank every `spec_md` and quietly turn the
-    demo's embedded-spec assertions into a mystery failure.
+    The caller owns the try/finally terminate. Returning the buffer beats monkeypatching it
+    onto the `Popen`, which needed a `type: ignore` at every read site. `LOOM_ARM` is
+    scrubbed from the child's environment: a stray `claims_only` would blank every
+    `spec_md` and quietly turn the demo's embedded-spec assertions into a mystery failure.
     """
     env = {k: v for k, v in os.environ.items() if k not in ("LOOM_ARM", "LOOM_BYPASS")}
     proc = subprocess.Popen(
@@ -119,8 +121,7 @@ def run_server(db: str, repo_root: str, port: int) -> subprocess.Popen:
     logs: list[str] = []
     for stream in (proc.stdout, proc.stderr):
         threading.Thread(target=_drain, args=(stream, logs), daemon=True).start()
-    proc.loom_logs = logs                       # type: ignore[attr-defined]
-    return proc
+    return proc, logs
 
 
 # ------------------------------------------------------------------ transcript helpers
@@ -387,6 +388,10 @@ def demo() -> None:
         # The copy is named `pyrepo` on purpose: `loom index` and `loom.server.app` both mint
         # the repo salt from the repo-root basename, so one directory name gives one spelling.
         repo_root = os.path.join(tmp, "pyrepo")
+        if not os.path.isdir(FIXTURE):
+            raise SystemExit(
+                f"loom demo: fixture repo not found at {FIXTURE}. The demo reads it from the "
+                "source checkout, so run it from a clone rather than an installed wheel.")
         shutil.copytree(FIXTURE, repo_root)
         db = os.path.join(tmp, "loom.sqlite3")
         home = os.path.join(tmp, "home")
@@ -408,18 +413,18 @@ def demo() -> None:
             fh.write(f'server_url = "http://127.0.0.1:{port}"\nagent = "{B_AGENT}"\n'
                      f'repo = "pyrepo"\nrepo_root = "{repo_root}"\n')
 
-        proc = run_server(db, repo_root, port)
+        proc, server_logs = run_server(db, repo_root, port)
         try:
             try:
                 wait_for_port(port)
             except TimeoutError:
                 raise RuntimeError("server never came up:\n"
-                                   + "\n".join(proc.loom_logs[-20:])) from None  # type: ignore[attr-defined]
+                                   + "\n".join(server_logs[-20:])) from None
             _say(f"server      http://127.0.0.1:{port}/mcp  (pid {proc.pid})", "  ")
             asyncio.run(_script(f"http://127.0.0.1:{port}/mcp", home, repo_root, db))
         except BaseException:
             print("\n--- server log tail ---", file=sys.stderr)
-            print("\n".join(proc.loom_logs[-20:]), file=sys.stderr)  # type: ignore[attr-defined]
+            print("\n".join(server_logs[-20:]), file=sys.stderr)
             raise
         finally:
             proc.terminate()

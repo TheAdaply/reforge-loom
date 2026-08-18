@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync the locked environment
+        run: uv sync --frozen
+
+      - name: Lint
+        run: uv run ruff check src tests
+
+      - name: Tests
+        run: uv run pytest tests -q
+
+      # The README's headline command. It has its own test, but running it directly keeps the
+      # failure legible: a broken demo shows up as a broken demo, not as one red test name.
+      - name: Demo
+        run: uv run python -m loom.eval.harness --demo

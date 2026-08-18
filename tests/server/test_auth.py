@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import REPO, nid
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 
@@ -40,7 +41,6 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.shared._httpx_utils import create_mcp_http_client
 
 import loom.server.app as app_mod
-from conftest import REPO, nid
 from loom.cli.main import main as cli_main
 from loom.indexer.walk import index_repo
 from loom.server.app import resolve_token, state_payload
@@ -72,7 +72,7 @@ def test_state_reports_the_totals_behind_a_cap_that_bit(gconn) -> None:
     state = state_payload(gconn, REPO, [REPO])
 
     assert state["counts"] == {"nodes": 2, "edges": 2, "plans": 0, "claims": 0}
-    assert state["totals"] == {"nodes": 10, "edges": 9}      # the whole seeded fixture graph
+    assert state["totals"] == {"nodes": 11, "edges": 10}      # the whole seeded fixture graph
     assert state["truncated"] == {"nodes": True, "edges": True}
     assert len(state["nodes"]) == 2 and len(state["edges"]) == 2
 
@@ -85,7 +85,7 @@ def test_one_axis_can_be_truncated_while_the_other_is_whole(gconn) -> None:
     state = state_payload(gconn, REPO, [REPO])
 
     assert state["truncated"] == {"nodes": False, "edges": True}
-    assert state["counts"]["nodes"] == state["totals"]["nodes"] == 10
+    assert state["counts"]["nodes"] == state["totals"]["nodes"] == 11
 
 
 def test_nothing_is_truncated_when_the_whole_graph_fits(gconn) -> None:
@@ -108,7 +108,7 @@ def test_the_edge_total_counts_the_same_edges_the_payload_ships(gconn) -> None:
 
     state = state_payload(gconn, REPO, [REPO])
 
-    assert state["totals"]["edges"] == 9                      # the foreign-src edge is not ours
+    assert state["totals"]["edges"] == 10                     # the foreign-src edge is not ours
     assert state["truncated"] == {"nodes": False, "edges": False}
 
 

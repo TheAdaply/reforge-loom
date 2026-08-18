@@ -4,4 +4,4 @@ __pycache__/
 *.sqlite3
 *.egg-info/
 .venv/
-uv.lock
+# uv.lock IS committed: `uv sync --frozen` in CI and the quickstart depend on it.

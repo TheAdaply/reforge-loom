@@ -1,7 +1,7 @@
 # GATE-1 — skeptic review of PLAN-v1 extractions
 
 Reviewer: skeptic gate, 2026-08-18.
-Scope: PLAN-v1.md + all 9 files in `loom/docs/extractions/`.
+Scope: PLAN-v1.md + all 9 files in `docs/extractions/` (now `docs/archive/extractions/`).
 Method: full read of every file, plus sampled verification of load-bearing claims against the
 actual sources (saved doc fetch, vendor clones, specgate checkout, installed mcp 2.0.0 SDK).
 
@@ -19,7 +19,7 @@ with each other on load-bearing conventions.
 | Check | Result | Evidence |
 |---|---|---|
 | (a) hooks-contract quotes OFFICIAL docs for stdin JSON, exit-2, matcher wiring | **PASS** | Doc is grounded in a saved 273,639-byte fetch of `code.claude.com/docs/en/hooks.md` (`scratchpad/hooks-ref.md`, verified present). Sampled 10 cited line refs against the saved copy — all match: exit-2 headline `:756`, exit-2-overrides-JSON `:775`, stderr-as-denial-reason `:1719`, 10k output cap `:885`, MCP `.*` requirement `:361`, matcher-semantics table `:288-290`, common-input-fields anchor `:708-712`, verbatim stdin example `:733+`, PreToolUse-specific fields `:1526`. `grep -c MultiEdit hooks-ref.md` → 0, confirming CORRECTIONS §5.1. Not recalled knowledge. |
-| (b) agent-mail zero verbatim code + rider recorded | **PASS with one named blemish** | Rider recorded correctly: clone `LICENSE` header is literally "MIT License (with OpenAI/Anthropic Rider), Copyright (c) 2026 Jeffrey Emanuel", and the rider's "use" definition names "benchmarking" (verified `LICENSE:36`). Pseudocode is written in loom vocabulary and does not mirror upstream structure — EXCEPT one line: the git argv list `["git","diff","--cached","--name-only","-z","--diff-filter=ACMRDTU"]` in §2.4 is token-identical to upstream `guard.py:277`. Strictly falsifies "zero verbatim". See Fix 1. |
+| (b) agent-mail zero verbatim code + rider recorded | **PASS with one named blemish** | Rider recorded correctly: clone `LICENSE` header is literally "MIT License (with OpenAI/Anthropic Rider), Copyright (c) 2026 Jeffrey Emanuel", and the rider's "use" definition names "benchmarking" (verified `LICENSE:36`). Pseudocode is written in loom vocabulary and does not mirror upstream structure — EXCEPT one line: the git argv list `["git","diff","--cached","--name-only","-z","--diff-filter=ACMRDTU"]` in §2.4 is token-identical to upstream `guard.py:277`. A git invocation is a functional command spelling rather than copyable expression, so no code is being relied on here — but the document should say so plainly instead of asserting "zero verbatim" unqualified. See Fix 1. |
 | (c) every file has a LICENSE section | **PASS** | All 9 files carry a §1 LICENSE with the restriction-that-matters stated. Spot-verified against sources: agent-mail rider ✓, beads/falkordb/serena/spec-kit plain MIT ✓ (`spec-kit/LICENSE` = "MIT License / Copyright GitHub, Inc."), specgate no-LICENSE-but-ours ✓ (clone root has none), conduit no-license/all-rights-reserved ✓, hooks-contract clone unlicensed (Cargo.toml license field commented out) ✓, papers arXiv nonexclusive-distrib ✓. |
 | (d) conduit-verify exact qualnames for both pairs + test-run result | **PASS** | Pair 1: `src/conduit/api/routes/auth.py::login` (verified L131 signature matches file), `src/conduit/core/security.py::decode_jwt_token` (verified L50), `core/middleware.py::TenantMiddleware.dispatch`. Pair 2 as planned (comment model) proven nonexistent (grep verified — no `class Comment` in src) and replaced with a fully-qualnamed Document editing-vs-retention pair. Test run: real output tail quoted, baseline 1039 passed / 4 failed with root-caused deselect list and a canonical eval command; explicit fallback (`gothinkster/django-realworld-example-app`) also given. |
 | (e) specgate quotes real MCPServer surface, not FastMCP | **PASS** | Verified against the actual checkout and installed SDK: `specgate/src/specgate/server.py:25` is `from mcp.server import MCPServer`; installed `mcp/server/__init__.py:4,7` re-exports `MCPServer`; `class MCPServer(Generic[LifespanResultT])` at `mcp/server/mcpserver/server.py:147`; no FastMCP in the package. Extraction quotes the ctor, `@mcp.tool()`, `run(transport="streamable-http")`, and the `/mcp` default path with SDK line refs. |
@@ -111,12 +111,12 @@ submodule, action item to add MIT upstream.
 Fixes 2–6 are cross-file contradictions: in each, pick the named winner (or overrule with
 reasons), then amend every listed site so the extraction set speaks with one voice.
 
-1. **agent-mail §2.4 — remove the one verbatim line (hard-check b blemish).** The subprocess argv
-   `["git","diff","--cached","--name-only","-z","--diff-filter=ACMRDTU"]` is token-identical to
-   upstream `guard.py:277` (unlicensed-for-us rider source). Reorder the flags (e.g.
-   `--diff-filter=ACMRDTU` before `-z`) or replace with prose ("staged names, NUL-separated,
-   filter ACMRDTU") and add a note that the invocation is a functional git command spelling. Keep
-   the document's "zero verbatim" claim true to the letter.
+1. **agent-mail §2.4 — state the one shared line accurately (hard-check b blemish).** The
+   subprocess argv `["git","diff","--cached","--name-only","-z","--diff-filter=ACMRDTU"]` matches
+   upstream `guard.py:277` token for token. Replace the pseudocode with prose ("staged names,
+   NUL-separated, filter ACMRDTU") and say plainly in the document that this is the ordinary
+   spelling of a git invocation rather than borrowed expression. Do not reword the document's
+   summary to make a claim true by rephrasing; describe what is actually shared.
 
 2. **Qualname convention — one canonical spelling (blocks M1/M3).** serena.md C1 proves the
    plan's `relative/path.py::Class.method` is not Serena's convention; Serena's within-file

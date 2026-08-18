@@ -35,23 +35,6 @@ DUP_JACCARD = 0.8
 # `git merge-tree --write-tree` (§1 pin). Older git falls back to a scratch worktree merge.
 MERGE_TREE_MIN = (2, 38)
 
-# conduit-verify §2.2: four deterministic pre-existing failures on the eval target's main.
-# Without deselecting them the `post_merge_test_failures` headline is wrong by +4 in EVERY
-# arm. Ships as code + config; the real three-arm conduit runs are post-MVP (§9.3 M4).
-BASELINE_DESELECT: tuple[str, ...] = (
-    "tests/unit/test_config_pipeline.py::TestGenerateConfigurationPipeline"
-    "::test_llm_path_with_augmentation",
-    "tests/unit/test_document_upload_security.py::TestPathTraversalPrevention"
-    "::test_path_traversal_filename_stripped",
-    "tests/unit/test_production_hardening.py::TestGeminiClientLifecycle"
-    "::test_get_llm_client_returns_singleton",
-    "tests/unit/test_production_hardening.py::TestGeminiClientLifecycle"
-    "::test_lifespan_closes_shared_client",
-)
-# `--no-cov`: the target forces `--cov` with `fail_under = 40` in addopts, so a plain run
-# fails the coverage gate whenever an agent's edits drop coverage (conduit-verify §2.2).
-PYTEST_BASE_ARGS: tuple[str, ...] = ("-q", "-p", "no:cacheprovider", "--no-cov")
-
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _COMMENT_RE = re.compile(r"^\s*#")
 _SPACE_RUN_RE = re.compile(r" {2,}")
@@ -321,24 +304,9 @@ def compute_metrics(hunks_a: list[Hunk], hunks_b: list[Hunk],
         "wasted_work_share": ((dup_lines + conflict_lines) / total_lines) if total_lines else None,
         "useful_lines": total_lines - dup_lines - conflict_lines,
     }
-    if total_lines:
-        assert dup_lines + conflict_lines <= total_lines, row
-        assert 0.0 <= row["wasted_work_share"] <= 1.0, row
+    # A law, not a debug check: `python -O` strips `assert`, and this is the guard that stops a
+    # nonsense number reaching a results table.
+    if total_lines and not (dup_lines + conflict_lines <= total_lines
+                            and 0.0 <= row["wasted_work_share"] <= 1.0):
+        raise AssertionError(f"metrics row violates the §2.5 bucket law: {row}")
     return row
-
-
-def assert_baseline_green(worktree: str) -> None:
-    """Pre-flight: the target's suite must be green MINUS the frozen quarantine list.
-
-    PLAN §6's headline is `post_merge_test_failures`; it assumes a green baseline and the eval
-    target's main is 1039 passed / 4 failed. Asserting here means a red arm is the agents'
-    doing, never the repo's. Ships as code; the real conduit runs are post-MVP (§9.3 M4).
-    """
-    deselect = [arg for nodeid in BASELINE_DESELECT for arg in ("--deselect", nodeid)]
-    proc = subprocess.run(["uv", "run", "--directory", worktree, "pytest",
-                           *PYTEST_BASE_ARGS, *deselect],
-                          capture_output=True, text=True, timeout=1800)
-    if proc.returncode != 0:
-        tail = "\n".join(proc.stdout.strip().splitlines()[-15:])
-        raise AssertionError(f"baseline is NOT green in {worktree} "
-                             f"(pytest exit {proc.returncode}):\n{tail}")

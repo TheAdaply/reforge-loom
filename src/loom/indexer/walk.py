@@ -39,12 +39,24 @@ from typing import Any
 
 from tree_sitter import Parser
 
-from loom.indexer.naming import norm_path, qualname as join_qualname
+from loom.indexer.naming import norm_path
+from loom.indexer.naming import qualname as join_qualname
 from loom.indexer.queries.python import LANGUAGE, Q_DEFS, Resolver, matches
 from loom.server.db import iso, log_event, now_s
 from loom.server.ids import node_id
 
-EXCLUDE_DIRS = {".git", ".venv", "venv", "node_modules", "site-packages", "build", "dist", "__pycache__", "frontend", "alembic", "tests"}
+# Directories never walked. Two groups, deliberately in one frozen set (BUILD-SPEC §9.1):
+#   never source     .git .venv venv node_modules site-packages build dist __pycache__
+#   convention skips frontend alembic tests — non-Python or generated in the layouts loom
+#                    targets. CONSEQUENCE: symbols under `tests/` get no nodes, so they are
+#                    not claimable and every edit there answers `new_path`/allow. Stated in
+#                    the README's MVP limits and in docs/troubleshooting.md. Not yet
+#                    configurable; making it so is a behavior change that needs its own
+#                    DECISIONS-DELTA entry.
+EXCLUDE_DIRS = {
+    ".git", ".venv", "venv", "node_modules", "site-packages", "build", "dist", "__pycache__",
+    "frontend", "alembic", "tests",
+}
 
 _PARSER = Parser(LANGUAGE)
 
@@ -176,8 +188,14 @@ def index_repo(conn, repo: str, repo_root: str, changed_only: bool = False) -> d
     # tick becomes permanently invisible.
     sources: dict[str, bytes] = {}
     for rel in files:
-        with open(os.path.join(repo_root, *rel.split("/")), "rb") as fh:
-            sources[rel] = fh.read()
+        try:
+            with open(os.path.join(repo_root, *rel.split("/")), "rb") as fh:
+                sources[rel] = fh.read()
+        except OSError:
+            # A broken symlink or an unreadable file is one file loom cannot gate, not a
+            # reason to leave the whole repo un-indexed (which would gate NOTHING).
+            continue
+    files = [rel for rel in files if rel in sources]
     changed = [rel for rel in files
                if not (changed_only and known.get(rel) == _sha(sources[rel]))]
     fresh = set(changed)
@@ -196,6 +214,7 @@ def index_repo(conn, repo: str, repo_root: str, changed_only: bool = False) -> d
         res.add_known(rel, {q: k for q, k, _ in ents},
                       [(n.start_byte, n.end_byte, q) for q, _, n in ents])
         res.index_file(rel, trees[rel])
+    sources.clear()          # every remaining pass reads `trees`, not bytes
     # Pass 2: whole-graph edge resolution. Both resolved kinds are dropped for the WHOLE
     # repo first — `delete_file_nodes` alone would leave an unchanged caller's CALLS edge
     # pointing at a callee that has since moved, and would never restore the inbound edge

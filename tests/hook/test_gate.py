@@ -55,7 +55,7 @@ OUT_OF_SCOPE_MSG = (
     'Call rescope(plan_id="lm-9c1x", add_targets=["src/app.py::helper"]), then retry this edit.'
 )
 NO_PLAN_MSG = (
-    'loom: no active plan for agent "akash-mbp". Before editing: write a spec from '
+    'loom: no active plan for agent "agent-a". Before editing: write a spec from '
     "templates/spec.md, resolve every target with resolve_nodes, call declare_plan, then retry "
     "this edit."
 )
@@ -83,7 +83,7 @@ def test_allow_in_plan_is_silent_exit_zero(stub, repo_root, configure, payload, 
     assert (r.returncode, r.stdout, r.stderr) == (0, "", "")
     # §6 wire mapping: the Edit's old_string sits inside AuthService.authenticate.
     assert stub.requests == [
-        {"agent": "akash-mbp", "repo": "demo", "path": "src/app.py",
+        {"agent": "agent-a", "repo": "demo", "path": "src/app.py",
          "qualname": "AuthService/authenticate", "tool_name": "Edit"}
     ]
 

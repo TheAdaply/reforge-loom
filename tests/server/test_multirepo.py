@@ -203,6 +203,27 @@ def test_an_unserved_or_absent_repo_on_the_gate_is_advisory(two_repo_server) -> 
         assert d["message"] == "" and d["node_id"] is None and d["plan_id"] is None
 
 
+def test_a_malformed_gate_body_still_gets_the_five_frozen_keys(two_repo_server) -> None:
+    """P2-3: the route promises "always HTTP 200 with exactly the five keys". An unparseable
+    body, a JSON array, a scalar and a non-string qualname all used to raise, so the route
+    500'd — which the hook fails open on, silently, while the server looks healthy."""
+    base, _db = two_repo_server
+    five = {"decision", "case", "message", "node_id", "plan_id"}
+    for raw in (b"", b"not json at all", b"[1, 2, 3]", b'"a string"', b"7"):
+        req = urllib.request.Request(base + "/gate", data=raw,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            assert r.status == 200, raw
+            d = json.loads(r.read())
+        assert set(d) == five, raw
+        assert (d["decision"], d["case"]) == ("allow", "unindexed"), raw
+
+    # A non-string qualname reaches `prefix_candidates` and must be read as "no symbol".
+    d = post(base, "/gate", {"agent": "bo", "repo": "alpha", "path": SHARED,
+                             "qualname": ["not", "a", "string"], "tool_name": "Edit"})
+    assert set(d) == five and d["decision"] in ("allow", "deny")
+
+
 # --------------------------------------------------------------------------- §6.d
 
 

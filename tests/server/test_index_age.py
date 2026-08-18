@@ -1,7 +1,7 @@
 """U2 — `index_age`: staleness as a VERDICT on `/state`, never an error and never a block.
 
-Softened from graphify's PreToolUse staleness nudge (`graphify/cli.py:668-697`,
-"#1840(b): soften, never block"). The three things worth pinning are the three ways a
+Posture adapted from graphify's PreToolUse staleness nudge — soften, never block; no code
+copied, see CREDITS.md. The three things worth pinning are the three ways a
 number like this goes wrong in production: it lies about a fresh index (the `iso()`
 truncation trap), it lies about an absent one (never-indexed is not "behind"), and it
 turns a 2s dashboard poll into an `os.walk` storm (the TTL).
@@ -14,9 +14,9 @@ import time
 from collections.abc import Iterator
 
 import pytest
+from conftest import REPO
 
 import loom.server.app as app_mod
-from conftest import REPO
 from loom.server.app import index_age, state_payload
 from loom.server.db import iso, log_event, now_s
 

@@ -1,25 +1,19 @@
 # loom BUILD-SPEC — the frozen implementation contract
 
+> **SUPERSEDED IN PART.** This document is the frozen contract the MVP was built against and is
+> never edited. `MULTIREPO-SPEC.md` (deltas D1-D6) and `ITERATION-2-SPEC.md` (D7-D11) amend it, and
+> the U1/U2/U3 recon fixes came after both. Where they conflict, the newest amendment wins; where
+> an amendment conflicts with the code, the code wins. For the current agent-facing contract read
+> `docs/protocol.md`, and for the document map read `docs/README.md`.
+
 Status: **FROZEN** (harden pass, 2026-08-18). Supersedes nothing; implements
 `PLAN-v1.md` + all GATE-1 fixes. Every extraction correction is folded in — a coder agent needs
-**only this file plus its own milestone brief (§9)**; the extractions under
-`/Users/cero/Desktop/PROJECTS/reforge-workspace/re-forge-irl-data-team-collab/loom/docs/extractions/`
-are provenance, not required reading. PLAN-v1.md is user-authored verbatim and is NOT edited; every
+**only this file plus its own milestone brief (§9)**; the extractions (since moved to
+`docs/archive/extractions/`) are provenance, not required reading. PLAN-v1.md is user-authored verbatim and is NOT edited; every
 correction to it lives in §11 DECISIONS-DELTA.
 
-Repo root (absolute, use everywhere):
-`/Users/cero/Desktop/PROJECTS/reforge-workspace/re-forge-irl-data-team-collab/loom`
-— referred to below as `$LOOM` (expand it literally in commands; do not rely on shell vars persisting).
-
-```
-ENV GOTCHAS (obey or you will waste your whole budget):
-- Before ANY shell command run: cd /Users/cero
-- Use ABSOLUTE paths for every file operation and script arg. cwd-relative ops are
-  sandbox-denied inside the project dir (even os.getcwd() can raise PermissionError there).
-- Python: uv run --directory /Users/cero/Desktop/PROJECTS/reforge-workspace/re-forge-irl-data-team-collab/loom ...
-- macOS: there is no `timeout` binary. Use Python subprocess timeouts (specgate demo pattern).
-- Write files first, verify after; never edit outside your milestone's whitelist.
-```
+`$LOOM` below means the root of your checkout of this repository — expand it yourself. The
+build-session shell notes that used to sit here have moved to the root `CLAUDE.md`.
 
 ---
 
@@ -262,6 +256,10 @@ caller-asserted `agent: str` in MVP (accepted specgate limitation; token identit
 `repo` params default `""` = the served repo; a non-empty mismatch returns
 `{"ok": false, "reason": "wrong_repo"}`. Timestamps: `*_ts` unix float + `*_iso` ISO-8601 UTC `Z`.
 
+> DECISIONS pointer (not an edit — this section stays historical): the code returns
+> `{"ok": false, "reason": "unknown_repo", "served": [...]}` per MULTIREPO-SPEC §2 (D3).
+> `src/loom/server/tools.py`; also `docs/protocol.md`.
+
 **Conflict object (one shape everywhere):**
 
 ```json
@@ -393,7 +391,7 @@ Request (JSON body; `path` repo-root-relative POSIX via `norm_path`; `qualname` 
 or unknown — server resolves via §4's longest-prefix rule):
 
 ```json
-{"agent": "akash-mbp", "repo": "conduit", "path": "src/conduit/core/security.py",
+{"agent": "agent-a", "repo": "conduit", "path": "src/conduit/core/security.py",
  "qualname": "decode_jwt_token", "tool_name": "Edit"}
 ```
 
@@ -859,17 +857,8 @@ M4 → `mcp` client + subprocess + `server.db` (read). Anything else: stop and r
 
 ### 9.3 MILESTONE BRIEFS (each self-contained: this file + the brief is the coder's whole world)
 
-Common to every brief — repeat and obey:
-
-```
-ENV GOTCHAS (obey or you will waste your whole budget):
-- Before ANY shell command run: cd /Users/cero
-- Use ABSOLUTE paths for every file operation and script arg. cwd-relative ops are
-  sandbox-denied inside the project dir (even os.getcwd() can raise PermissionError there).
-- Python: uv run --directory /Users/cero/Desktop/PROJECTS/reforge-workspace/re-forge-irl-data-team-collab/loom ...
-- macOS: there is no `timeout` binary. Use Python subprocess timeouts.
-- Edit ONLY files in your whitelist (§9.2). Read BUILD-SPEC.md fully before writing code.
-```
+Common to every brief: edit only the files in your whitelist (§9.2), and read this file fully
+before writing code.
 
 ---
 
@@ -888,13 +877,12 @@ FalkorDB code-graph (MIT, (c) 2024 FalkorDB).
 
 Whitelist: §9.2 M0 row. Acceptance (ALL must pass, run exactly these):
 ```
-cd /Users/cero
-uv sync --directory /Users/cero/Desktop/PROJECTS/reforge-workspace/re-forge-irl-data-team-collab/loom
-uv run --directory /Users/cero/Desktop/PROJECTS/reforge-workspace/re-forge-irl-data-team-collab/loom \
+uv sync --directory $LOOM
+uv run --directory $LOOM \
   python -c "from tree_sitter import Language, Query, QueryCursor; import tree_sitter_python; \
 l = Language(tree_sitter_python.language()); q = Query(l, '(function_definition name: (identifier) @name)'); \
 print('ts-probe-ok')"
-uv run --directory /Users/cero/Desktop/PROJECTS/reforge-workspace/re-forge-irl-data-team-collab/loom \
+uv run --directory $LOOM \
   pytest tests/test_ids.py tests/test_naming.py tests/test_m0_smoke.py -q
 ```
 Probe fails → STOP, report the actual tree-sitter API surface; do not improvise. Tests must cover:
@@ -928,8 +916,7 @@ stable. Record in a comment: inbound-CALLS-stale caveat accepted (falkordb C5).
 
 Whitelist: §9.2 M1 row. Acceptance:
 ```
-cd /Users/cero
-uv run --directory /Users/cero/Desktop/PROJECTS/reforge-workspace/re-forge-irl-data-team-collab/loom \
+uv run --directory $LOOM \
   pytest tests/indexer -q
 ```
 Stretch (only if the local conduit clone exists; do not block on it):
@@ -963,8 +950,7 @@ overlapping targets: EXACTLY one `ok: true`; the loser's response embeds the win
 
 Whitelist: §9.2 M2 row. Acceptance:
 ```
-cd /Users/cero
-uv run --directory /Users/cero/Desktop/PROJECTS/reforge-workspace/re-forge-irl-data-team-collab/loom \
+uv run --directory $LOOM \
   pytest tests/server -q
 ```
 
@@ -995,8 +981,7 @@ no duplicate); `ls/show/release` against a tmp db.
 
 Whitelist: §9.2 M3 row. Acceptance:
 ```
-cd /Users/cero
-uv run --directory /Users/cero/Desktop/PROJECTS/reforge-workspace/re-forge-irl-data-team-collab/loom \
+uv run --directory $LOOM \
   pytest tests/hook -q
 ```
 
@@ -1022,16 +1007,20 @@ are post-MVP.
 
 Whitelist: §9.2 M4 row. Acceptance:
 ```
-cd /Users/cero
-uv run --directory /Users/cero/Desktop/PROJECTS/reforge-workspace/re-forge-irl-data-team-collab/loom \
+uv run --directory $LOOM \
   pytest tests/eval -q
-uv run --directory /Users/cero/Desktop/PROJECTS/reforge-workspace/re-forge-irl-data-team-collab/loom \
+uv run --directory $LOOM \
   python -m loom.eval.harness --demo
 ```
 
 ---
 
 ## 10. MVP CUTS (enforced; from the PLAN addendum — anything here appearing in a diff is a defect)
+
+> DECISIONS pointer (not an edit — this section stays historical): two items on this list have
+> since shipped. **multi-repo serve** landed per MULTIREPO-SPEC (D1-D6) and **token identity**
+> landed as the optional shared token per ITERATION-2-SPEC §3 (D8-D9). Everything else on the list
+> is still out.
 
 OUT: rename tolerance / body-hash claim transfer (v1.5) · `server/impact.py` and everything
 CodePlan-derived (v2, `LOOM_IMPACT` off; only the `sig_hash` column and free-TEXT `edges.kind`
@@ -1131,6 +1120,52 @@ spec-vs-args set-equality validation. IN and mandatory: hook fail-open exactly p
     180–230 non-blank lines; every init step is load-bearing for §7.5's frozen registration
     contract, so nothing is cuttable. server/indexer/hook budgets unchanged. Do not "fix" this
     back to 150.
+
+25. **Machine-absolute paths and the build-session ENV GOTCHAS blocks removed for publication.**
+    Every `/Users/...` literal in this file is now `$LOOM`, and the six repeated ENV GOTCHAS
+    blocks (a build-session shell preamble, whose one durable item was "no `timeout` binary")
+    are deleted. Their durable content lives in the root `CLAUDE.md`. No contract text changed.
+
+26. **Conflict scope is the UNION of the two single-direction CONTAINS closures, not one mixed
+    walk** (`claims._scope_for_conflicts`). §4 said a claim is judged over its containment
+    closure and the implementation read that as one transitive up-and-down walk, which pivots
+    through the File node and pulls in every sibling. Declaring one function therefore contended
+    with every other function in the file — file granularity, contradicting the product's whole
+    claim — while the gate's `check_node` already asked the narrower question. Declare and
+    enforce now agree. A file claim still covers everything inside it; a symbol claim still
+    collides with a claim on its class or file. Pinned by
+    `test_conflict_scope_is_ancestors_and_contained_never_siblings` and
+    `test_two_agents_may_claim_two_unrelated_symbols_in_one_file`.
+
+27. **`loom index --changed` gets `default=False`, and `--full` is added.** `main()` merges
+    `{"default": None} | opts`, so the flag's default was `None`, which downstream means "choose
+    automatically" — the flag was a no-op and there was no way to force a full rebuild.
+
+28. **The dashboard's truncation note reads the numbers instead of stating them.** It said
+    "graph truncated to first 600 nodes", a copy of `STATE_NODE_CAP` that a later cap change
+    would silently falsify. It now says "showing N of M nodes" from `/state`'s own
+    `counts`/`totals`. The fabric also gained a static legend, because its visual vocabulary
+    was discoverable only by hovering — no help to anyone reading a screenshot.
+
+29. **`loom init` writes `~/.loom/config.toml` only when there is none** (§7.5 amended). It is
+    still READ as the last discovery fallback. Rewriting it on every init re-created the exact
+    stale-global bug the per-repo `.claude/loom.toml` was added to fix: initializing a second
+    repo repointed the first repo's fallback at the second repo's server, which answers `allow`
+    for a salt it does not serve.
+
+30. **`POST /gate` answers its own contract on a malformed body** (P2-3). An unparseable body, a
+    JSON array or scalar, and a non-string `qualname` used to raise, so the route returned 500 —
+    which the hook fails open on, silently, while the server looked healthy. The five frozen wire
+    keys are unchanged.
+
+31. **`THIRD_PARTY_NOTICES.md` restructured for publication; §12 below stays the historical
+    record.** The three code-derived notices (beads, FalkorDB/code-graph, Serena) are kept and
+    STRENGTHENED — each now carries the full upstream license text under `third_party/LICENSES/`
+    and names the loom files that implement it, and `pyproject.toml`'s `license-files` makes them
+    travel into built artifacts. The five PATTERN-ONLY entries (spec-kit, mcp_agent_mail, graft,
+    graphiti, graphify) moved to `CREDITS.md` with their "no code from it is included" sentences
+    intact: no code is included, so no license is relied on, so no notice obligation exists for
+    them. Nothing was deleted.
 
 ---
 

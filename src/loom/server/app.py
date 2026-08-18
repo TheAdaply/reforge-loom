@@ -13,7 +13,8 @@ the default everywhere a name is omitted — which is exactly how the single-rep
 of BUILD-SPEC survives unchanged.
 
 ITERATION-2-SPEC adds two honest-about-itself layers: §2 (D7) makes `/state`'s caps visible
-instead of silent, and §3 (D8-D9) puts an OPT-IN shared token in front of `/gate`, `/state`
+instead of silent, and ITERATION-2 §3 (D8-D9) puts an OPT-IN shared token in front of `/gate`,
+`/state`
 and `/mcp` while `/health` stays open and names the mode.
 """
 
@@ -159,7 +160,7 @@ def resolve_token(flag: str | None) -> str:
     """ITERATION-2-SPEC §3 — the shared secret from `--token SECRET` or `LOOM_TOKEN`.
 
     The flag wins when it is present at all. The two empty cases are deliberately NOT
-    symmetric (§5a refines §3's one-liner):
+    symmetric (ITERATION-2 §5a refines its §3 one-liner):
 
     - `--token ""` is a HARD ERROR. beads §2.3 applied to the one flag where the wildcard
       reading is dangerous: `--token "$UNSET_VAR"` from a broken shell expansion would
@@ -189,7 +190,8 @@ class TokenAuth:
 
     A wrong or missing token is answered `401 {"ok": false, "error": "unauthorized"}` even
     on `/gate`: a 401 is a TRANSPORT refusal, not a gate decision, and the hook treats any
-    non-200 as fail-open — the correct advisory posture for a misconfigured client (§3).
+    non-200 as fail-open — the correct advisory posture for a misconfigured client
+    (ITERATION-2 §3).
     """
 
     def __init__(self, app, token: str) -> None:
@@ -226,9 +228,9 @@ def index_age(c: sqlite3.Connection, repo: str, repo_root: str, now: float) -> d
 
     `{"indexed_at": <unix s | None>, "dirty_files": <count>, "stale": <bool>}`.
 
-    Softened from graphify (Apache-2.0) `graphify/cli.py:668-697`, whose PreToolUse hook
-    swaps its orientation nudge for a stale one when the target file's mtime beats the
-    graph's — "#1840(b): soften, never block". loom takes the posture and drops the
+    Posture adapted from graphify (Apache-2.0) — no code copied; see CREDITS.md. Its
+    PreToolUse hook swaps an orientation nudge for a stale one when the target file's
+    mtime beats the graph's: soften, never block. loom takes that posture and drops the
     coupling: this is reported on `/state` (dashboard + `loom doctor`) and NOWHERE on
     `/gate`, whose five wire keys are frozen and whose 1.5s budget cannot afford a tree
     scan. An agent is never blocked, slowed, or nagged by this number; a human sees it.
@@ -293,7 +295,7 @@ def state_payload(c: sqlite3.Connection, repo: str, served: list[str],
             f"SELECT c.node_id, c.plan_id, c.mode, p.agent FROM claims c "
             f"JOIN plans p ON p.id = c.plan_id "
             f"WHERE c.released IS NULL AND c.plan_id IN ({marks})", active_ids)]
-    # repo = '' is pre-migration history (§3): it belongs to no repo in particular,
+    # repo = '' is pre-migration history (MULTIREPO §3): it belongs to no repo in particular,
     # so it is shown in every feed rather than disappearing from all of them.
     events = [dict(r) for r in c.execute(
         "SELECT ts, actor, action, detail FROM events WHERE repo = ? OR repo = '' "
@@ -382,13 +384,26 @@ def build_server(db_path: str, repos: dict[str, str], token: str = "") -> MCPSer
         we do not serve — or none at all — is answered advisory: a repo this server knows
         nothing about is never bricked (§6 case 2 spirit), it is simply not ours to judge.
         """
-        body = await request.json()
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError               # a JSON array or scalar has no .get
+        except Exception:
+            # P2-3: an unparseable body used to raise, so the route 500'd — the hook fails
+            # open on that, but the "always 200, five keys" contract above was false and the
+            # server logged a traceback for input it should have answered. An empty dict
+            # falls into the unserved-repo branch below, which is exactly the right answer.
+            body = {}
         asked = str(body.get("repo") or "")
         if asked not in repos:
             return JSONResponse({"decision": "allow", "case": "unindexed", "message": "",
                                  "node_id": None, "plan_id": None})
+        q = body.get("qualname")
         d = gate_decision(conn(), repo=asked, agent=str(body.get("agent") or ""),
-                          path=str(body.get("path") or ""), qualname=body.get("qualname"),
+                          path=str(body.get("path") or ""),
+                          # P2-3: a non-string qualname reaches `prefix_candidates` and
+                          # explodes. Anything that is not a string is "no symbol named".
+                          qualname=q if isinstance(q, str) else None,
                           now=now_s())
         return JSONResponse({k: d[k] for k in
                              ("decision", "case", "message", "node_id", "plan_id")})
@@ -401,7 +416,8 @@ def serve(host: str, port: int, db_path: str, repos: dict[str, str], token: str 
 
     The Starlette app is built here rather than left to `MCPServer.run(transport=...)`
     because `run` offers no seam to wrap: it builds the app and hands it to uvicorn in one
-    breath. Everything below IS `run_streamable_http_async`, plus §3's optional guard. An
+    breath. Everything below IS `run_streamable_http_async`, plus ITERATION-2 §3's optional
+    guard. An
     open server (`token == ""`) is wrapped in nothing at all.
     """
     import uvicorn
@@ -415,7 +431,8 @@ def serve(host: str, port: int, db_path: str, repos: dict[str, str], token: str 
 
 def main() -> None:
     ap = argparse.ArgumentParser(prog="loom.server.app", description="run the loom server")
-    # Repeatable: `--repo-root PATH` (name = basename) or `--repo-root NAME=PATH` (§1).
+    # Repeatable: `--repo-root PATH` (name = basename) or `--repo-root NAME=PATH`
+    # (MULTIREPO §1).
     ap.add_argument("--repo-root", action="append", default=None)
     ap.add_argument("--repo", default="")
     ap.add_argument("--host", default="0.0.0.0")

@@ -1,6 +1,6 @@
 # Extraction: GitHub spec-kit → `loom/templates/spec.md`
 
-**Source clone**: `/private/tmp/claude-501/-Users-cero-.../scratchpad/vendor/spec-kit`
+**Source clone**: `<vendor-clone>/spec-kit`
 (upstream `github.com/github/spec-kit`)
 **Commit**: `13344409786a29f631c24ee49e9f307e7b588465`, Mon 2026-08-17 18:32:12 -0500
 **Plan reference**: PLAN-v1.md §2 (cherry-pick manifest), §4.4 (protocol / spec template fields)

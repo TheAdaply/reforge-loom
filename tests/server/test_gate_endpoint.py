@@ -151,7 +151,7 @@ def test_every_decision_carries_the_five_wire_keys(gconn: sqlite3.Connection) ->
     for agent, path, qual in [("aria", "models.py", "User"), ("bo", "models.py", "User"),
                               ("bo", "util.py", "hash_pw"), ("aria", "new.py", None)]:
         d = gate(gconn, agent, path, qual)
-        assert WIRE_KEYS <= set(d)
+        assert set(d) >= WIRE_KEYS
         assert d["decision"] in ("allow", "deny")
         assert (d["message"] == "") is (d["decision"] == "allow")
 

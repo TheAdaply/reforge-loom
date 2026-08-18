@@ -135,7 +135,7 @@ def test_a_burst_of_concurrent_declares_never_raises_operational_error(live) -> 
                 clients[3] as c3, clients[4] as c4, clients[5] as c5:
             live_clients = [c0, c1, c2, c3, c4, c5]
             calls = [c.call_tool("declare_plan", declare_args(f"ag{i}", t))
-                     for i, (c, t) in enumerate(zip(live_clients, targets))]
+                     for i, (c, t) in enumerate(zip(live_clients, targets, strict=True))]
             return [r.structured_content for r in await asyncio.gather(*calls)]
 
     results = asyncio.run(burst())

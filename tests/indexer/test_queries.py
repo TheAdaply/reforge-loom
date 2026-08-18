@@ -8,7 +8,14 @@ from __future__ import annotations
 
 import pytest
 
-from loom.indexer.queries.python import Q_CALL, Q_IMPORT, Q_IMPORT_FROM, Resolver, captures, dotted_parts
+from loom.indexer.queries.python import (
+    Q_CALL,
+    Q_IMPORT,
+    Q_IMPORT_FROM,
+    Resolver,
+    captures,
+    dotted_parts,
+)
 
 REPO = "fx"
 

@@ -21,7 +21,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from loom.server.db import connect, immediate, init_db, iso, log_event, now_s
+from loom import __version__
+from loom.server.db import connect, immediate, init_db, iso, now_s
 
 # §7.5 frozen matcher groups: the exact-string list, then the SUFFIX regex — never
 # `mcp__serena__.*`, because the MCP server key is user-minted (GATE-1 fix 4).
@@ -113,6 +114,12 @@ def cmd_serve(args: argparse.Namespace) -> None:
     db = _db_of(args, next(iter(repos.values())))
     # PLAN §4.5: `loom serve` starts server PLUS indexer — one process, no separate
     # `loom index` step before first use. Incremental thereafter via mtime+hash, PER REPO.
+    if os.environ.get("LOOM_ARM"):
+        # `LOOM_ARM=claims_only` blanks `spec_md` everywhere it is surfaced. That turns every
+        # deny into a refusal with no reason attached, which reads exactly like a bug. It is
+        # an evaluation control arm, so say so at boot rather than let someone debug it.
+        print(f"loom: LOOM_ARM={os.environ['LOOM_ARM']} — evaluation arm active; spec text is "
+              "suppressed in conflicts and deny messages", flush=True)
     for repo, repo_root in repos.items():
         stats = _index(db, repo, repo_root, changed_only=None)
         print(f"loom: indexed {json.dumps({'repo': repo, **stats}, default=str)}", flush=True)
@@ -127,13 +134,24 @@ def _index(db: str, repo: str, repo_root: str, changed_only: bool | None) -> dic
 
     init_db(db)
     conn = connect(db)
-    if changed_only is None:
-        # Scoped to THIS repo: with one db behind several repos, "warm" has to mean
-        # "warm for this salt", or a second repo's first index would run incremental.
-        changed_only = conn.execute("SELECT 1 FROM nodes WHERE repo=? LIMIT 1",
-                                    (repo,)).fetchone() is not None
-    stats = index_repo(conn, repo, repo_root, changed_only=changed_only)
-    conn.close()
+    try:
+        if changed_only is None:
+            # Scoped to THIS repo: with one db behind several repos, "warm" has to mean
+            # "warm for this salt", or a second repo's first index would run incremental.
+            changed_only = conn.execute("SELECT 1 FROM nodes WHERE repo=? LIMIT 1",
+                                        (repo,)).fetchone() is not None
+        # ONE transaction for the whole rebuild. `connect` is autocommit, and the two-pass
+        # walk deletes before it writes: between those autocommits a file has zero node
+        # rows, so a concurrent /gate resolves `new_path` and ALLOWS over a live foreign
+        # claim — silently, reading as normal. Pass 2 has the same window for edges, which
+        # leaves a plan declared inside it with no CALLS expansion for its whole lifetime.
+        # The price is the write lock held for the parse (~150ms per 200 files); concurrent
+        # declares queue on `busy_timeout` instead of racing, and WAL readers keep the
+        # pre-index snapshot throughout. That is the trade worth making.
+        with immediate(conn):
+            stats = index_repo(conn, repo, repo_root, changed_only=changed_only)
+    finally:
+        conn.close()
     return stats
 
 
@@ -142,7 +160,8 @@ def cmd_index(args: argparse.Namespace) -> None:
     # Mirror `serve`: a team that pinned a stable salt with `serve --repo NAME` must be able
     # to re-index under it, or the served graph goes permanently stale (§11.19).
     repo = args.repo or _repo_of(repo_root)
-    stats = _index(_db_of(args, repo_root), repo, repo_root, changed_only=args.changed)
+    changed_only = False if args.full else (args.changed or None)
+    stats = _index(_db_of(args, repo_root), repo, repo_root, changed_only=changed_only)
     print(json.dumps({"repo": repo, **stats}, default=str))
 
 
@@ -203,7 +222,12 @@ def _merge_settings(repo_root: str, gate: str) -> int:
     data = {}
     if os.path.exists(path):
         with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
+            try:
+                data = json.load(fh)
+            except json.JSONDecodeError:
+                # `_json_file` already does this for doctor; init must not dump a traceback
+                # halfway through writing a checkout's files.
+                _die(f"{path} is not valid JSON; fix it by hand — loom will not overwrite it")
         if not isinstance(data, dict):
             _die(f"{path} is not a JSON object; fix it by hand — loom will not overwrite it")
     groups, added = data.setdefault("hooks", {}).setdefault("PreToolUse", []), 0
@@ -247,7 +271,12 @@ def _merge_mcp_json(repo_root: str, server: str, token: str = "") -> bool:
     data = {}
     if os.path.exists(path):
         with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
+            try:
+                data = json.load(fh)
+            except json.JSONDecodeError:
+                # `_json_file` already does this for doctor; init must not dump a traceback
+                # halfway through writing a checkout's files.
+                _die(f"{path} is not valid JSON; fix it by hand — loom will not overwrite it")
         if not isinstance(data, dict):
             _die(f"{path} is not a JSON object; fix it by hand — loom will not overwrite it")
     servers = data.setdefault("mcpServers", {})
@@ -266,17 +295,26 @@ def _merge_mcp_json(repo_root: str, server: str, token: str = "") -> bool:
     return True
 
 
+def _toml_str(v: str) -> str:
+    """A TOML basic string. `json.dumps` escapes `"` and `\\` exactly as TOML does, so an
+    unescaped quote or a Windows-shaped path can no longer produce a file that
+    `gate.load_config` silently rejects — leaving a permanently fail-open gate whose only
+    symptom is a warning line."""
+    return json.dumps(v)
+
+
 def _write_config(path: str, server: str, agent: str, repo: str, repo_root: str,
                   token: str = "") -> None:
     """Write the 4-key §7.5 config TOML, creating its directory.
 
     D10 adds an OPTIONAL fifth key. It is omitted entirely for an open server, so the file
-    an open checkout carries is byte-identical to the one it carried before this spec —
+    an open checkout carries is byte-identical to the one it carried before ITERATION-2 —
     and `gate.load_config` keeps requiring exactly the four mandatory keys."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
-        fh.write(f'server_url = "{server}"\nagent = "{agent}"\nrepo = "{repo}"\n'
-                 f'repo_root = "{repo_root}"\n' + (f'token = "{token}"\n' if token else ""))
+        fh.write(f"server_url = {_toml_str(server)}\nagent = {_toml_str(agent)}\n"
+                 f"repo = {_toml_str(repo)}\nrepo_root = {_toml_str(repo_root)}\n"
+                 + (f"token = {_toml_str(token)}\n" if token else ""))
 
 
 def _ignore_identity(repo_root: str) -> bool:
@@ -319,11 +357,18 @@ def cmd_init(args: argparse.Namespace) -> None:
     # backward compat; `gate.load_config` prefers the per-repo file it walks up to.
     local_cfg = os.path.join(repo_root, ".claude", "loom.toml")
     _write_config(local_cfg, args.server, agent, repo, repo_root, token)
-    _write_config(os.path.join(home, "config.toml"), args.server, agent, repo, repo_root, token)
+    # The GLOBAL copy is written only if there is none yet. `gate.load_config` still READS it
+    # as the last fallback, but rewriting it on every init re-creates the exact stale-global
+    # bug the per-repo file was added to fix: initializing a second repo would repoint the
+    # first repo's fallback at the second repo's server, which answers `allow` for a salt it
+    # does not serve.
+    global_cfg = os.path.join(home, "config.toml")
+    if not os.path.exists(global_cfg):
+        _write_config(global_cfg, args.server, agent, repo, repo_root, token)
     added = _merge_settings(repo_root, gate)
     mcp_added = _merge_mcp_json(repo_root, args.server, token)
     appended = _append_snippet(repo_root)
-    ignored = _ignore_identity(repo_root)
+    _ignore_identity(repo_root)      # the per-user loom.toml must never be committed
     # A mistyped command path leaves the gate silently disabled — prove exit 2 (§7.5).
     try:
         proc = subprocess.run([gate], input=json.dumps(VERIFY_PAYLOAD), capture_output=True,
@@ -334,7 +379,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         _die(f"gate verification failed: {gate} exited {proc.returncode}, expected 2")
     print(f"loom: initialized for repo '{repo}' as agent '{agent}'\n"
           f"  config    {local_cfg} (per-repo; wins for edits under {repo_root})\n"
-          f"  fallback  {os.path.join(home, 'config.toml')}\n"
+          f"  fallback  {global_cfg}\n"
           f"  hooks     {os.path.join(repo_root, '.claude', 'settings.json')} "
           f"({added} group(s) added, gate verified)\n"
           f"  mcp       {os.path.join(repo_root, '.mcp.json')} "
@@ -342,7 +387,10 @@ def cmd_init(args: argparse.Namespace) -> None:
           f"{', with the shared-token header' if token else ''})\n"
           f"  protocol  {'appended to' if appended else 'already in'} "
           f"{os.path.join(repo_root, 'CLAUDE.md')}\n"
-          f"  spec      {os.path.join(_templates(), 'spec.md')}\n\n{BYPASS_NOTE}")
+          f"  spec      {os.path.join(_templates(), 'spec.md')}\n"
+          f"  override  LOOM_CONFIG=<path> replaces the config above; LOOM_AGENT=<name>\n"
+          f"            replaces the identity — for several agents under one OS user\n"
+          f"\n{BYPASS_NOTE}")
 
 
 def _walk_up(start: str, *parts: str) -> str | None:
@@ -384,7 +432,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     Checks 9 and 10 are the two ways a graph can be untrue — absent, and behind — and both
     are WARN-only: neither can ever fail a CI run over something a single `loom index` fixes.
     """
-    from loom.hook import gate as hook_gate     # lazy: keeps `loom serve`'s import graph thin
+    from loom.hook import gate as hook_gate  # lazy: keeps `loom serve`'s import graph thin
 
     start = os.path.abspath(args.repo_root) if args.repo_root else os.getcwd()
     rows: list[tuple[str, str, str]] = []
@@ -574,28 +622,21 @@ def cmd_show(args: argparse.Namespace) -> None:
 
 
 def cmd_release(args: argparse.Namespace) -> None:
+    """The MCP `release` tool over the local database. Deliberately NOT its own copy of the
+    ownership rules — a second spelling of "who may release what" is a second thing to keep
+    true."""
+    from loom.server.claims import release as claims_release
+
     _no_empty(args, "agent")
     conn = connect(_existing_db_of(args))
-    stamp, err, freed = iso(now_s()), "", 0
-    with immediate(conn):
-        plan = conn.execute("SELECT agent, repo, status FROM plans WHERE id = ?",
-                            (args.plan_id,)).fetchone()
-        if plan is None:
-            err = "unknown_plan"
-        elif plan["agent"] != args.agent:
-            err = "not_owner"
-        elif plan["status"] != "active":
-            err = "not_active"
-        else:
-            freed = conn.execute("UPDATE claims SET released = ? WHERE plan_id = ? AND released "
-                                 "IS NULL", (stamp, args.plan_id)).rowcount
-            conn.execute("UPDATE plans SET status = 'done', updated = ? WHERE id = ?",
-                         (stamp, args.plan_id))
-            log_event(conn, args.agent, "released", args.plan_id, plan["repo"])
-    conn.close()
-    if err:
-        _die(err)
-    print(json.dumps({"ok": True, "released_claims": freed, "plan_status": "done"}))
+    try:
+        with immediate(conn):
+            result = claims_release(conn, args.plan_id, args.agent, "done", now_s())
+    finally:
+        conn.close()
+    if not result["ok"]:
+        _die(result["reason"])
+    print(json.dumps(result))
 
 
 VERBS = {
@@ -617,7 +658,13 @@ VERBS = {
                [("--repo-root", {"help": "defaults to the current directory"})]),
     "index": (cmd_index, "index a repo into the loom graph",
               [("--repo-root", {"required": True}), ("--repo", {"default": ""}), ("--db", {}),
-               ("--changed", {"action": "store_true"})]),
+               # `default=False` is load-bearing: main() merges `{"default": None} | opts`, and
+               # None means "auto" downstream, which made the flag a no-op. --full is its
+               # opposite: rebuild every node row even on a warm database.
+               ("--changed", {"action": "store_true", "default": False,
+                              "help": "skip re-writing node rows for unchanged files"}),
+               ("--full", {"action": "store_true", "default": False,
+                           "help": "force a full rebuild instead of the automatic choice"})]),
     "ls": (cmd_ls, "list active claims", [("--db", {}), ("--json", {"action": "store_true"})]),
     "show": (cmd_show, "show a plan (lm-...) or a node (n-...)", [("id", {}), ("--db", {})]),
     "release": (cmd_release, "release a plan's claims (owner only)",
@@ -627,6 +674,7 @@ VERBS = {
 
 def main() -> None:
     ap = argparse.ArgumentParser(prog="loom", description="loom — spec-driven coordination gate")
+    ap.add_argument("--version", action="version", version=f"loom {__version__}")
     sub = ap.add_subparsers(dest="cmd")
     for name, (fn, help_text, flags) in VERBS.items():
         parser = sub.add_parser(name, help=help_text)

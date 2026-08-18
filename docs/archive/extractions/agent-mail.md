@@ -1,6 +1,6 @@
 # Extraction: mcp_agent_mail → loom
 
-Source clone: `/private/tmp/claude-501/-Users-cero-Desktop-PROJECTS-reforge-workspace-re-forge-irl-data-team-collab/6458dacd-1b63-4e60-82c7-dac1ea52eb51/scratchpad/vendor/mcp_agent_mail`
+Source clone: `<vendor-clone>/mcp_agent_mail`
 Upstream: github.com/Dicklesworthstone/mcp_agent_mail (author Jeffrey Emanuel).
 Extraction targets: (1) TTL lease semantics + renewal, (2) advisory-by-design stance,
 (3) deny-message format with actionable next step, (4) pre-commit guard script shape.

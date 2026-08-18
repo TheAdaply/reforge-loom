@@ -24,7 +24,8 @@ _CFG_KEYS = ("server_url", "agent", "repo", "repo_root")
 _BYPASS_ON = frozenset({"1", "true"})
 _UNREACHABLE = "loom: coordination server unreachable — edit allowed, claims NOT checked"
 _NOT_INITIALIZED = "loom: not initialized — run loom init"
-# `decide()` is pure (§9.1), so the audit record it computes is parked here for main()'s IO.
+# `decide()` does no IO (§9.1) — not the same as pure: it parks the audit record it computes
+# here, for main() to write.
 _REC: dict = {}
 
 

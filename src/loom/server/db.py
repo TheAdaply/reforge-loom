@@ -1,14 +1,17 @@
 """Frozen artifact — BUILD-SPEC §2. SQLite schema, connection pragmas, transaction law.
 
-ALL SQL for loom's storage lives in `db.py` / `claims.py` (never inline elsewhere) so the
-v2 Postgres flip is a localized rewrite (§11.11). stdlib `sqlite3` only — no SQLAlchemy.
+Every SQL statement that JUDGES a claim lives in `db.py` / `claims.py`, so the v2 Postgres
+flip is a localized rewrite (§11.11). Three callers carry their own SQL by design and are
+the whole list: the indexer's node/edge writes (`indexer/walk.py`), the dashboard's read
+payload (`server/app.py`), and the CLI admin verbs (`cli/main.py`). stdlib `sqlite3` only —
+no SQLAlchemy.
 """
 
 from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from time import time
 
@@ -128,10 +131,29 @@ def immediate(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     try:
         yield conn
     except BaseException:
-        conn.execute("ROLLBACK")
+        _abort(conn)
         raise
     else:
-        conn.execute("COMMIT")
+        try:
+            conn.execute("COMMIT")
+        except BaseException:
+            # A failed COMMIT leaves the transaction open, and `app.connection_factory`
+            # hands out ONE long-lived connection per worker thread — so without this the
+            # thread's every later BEGIN IMMEDIATE fails forever, with no self-heal path.
+            _abort(conn)
+            raise
+
+
+def _abort(conn: sqlite3.Connection) -> None:
+    """Best-effort ROLLBACK that never displaces the exception being propagated.
+
+    SQLite rolls back implicitly on the SQLITE_FULL / SQLITE_IOERR / SQLITE_BUSY /
+    SQLITE_NOMEM error class, and an explicit ROLLBACK after that raises "cannot rollback -
+    no transaction is active" — which would replace the caller's real error with plumbing
+    noise in every incident report of that class.
+    """
+    with suppress(sqlite3.OperationalError):
+        conn.execute("ROLLBACK")
 
 
 def log_event(

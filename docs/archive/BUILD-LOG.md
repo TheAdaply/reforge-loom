@@ -23,14 +23,11 @@
   controlled edge-dump gate (byte-identical pyrepo build, only by-design P1-5/P2-6 deltas) is
   stronger verification than the interim-patch route, and both verifier and live boot confirm
   behavior. P1-5/P2-6 are thereby CLOSED by S1. Remaining open by charter: P2-1..4, P3 tail.
-- 2026-08-18 TCC incident: Desktop access lost mid-pass (stale per-folder deny overriding FDA);
-  fixed live via tccutil reset SystemPolicyDesktopFolder com.apple.Terminal. Zero work lost.
 - 2026-08-18 Iteration 2 complete (a055e8a + 9969a77): opt-in token auth (18/18 live-fire,
   ambient-canary suite run), /state totals+truncated, fabric focus mode (verified by executing
   the page JS on real payloads). 298 tests. Mid-iteration: an accidental SendMessage-resume fork
   of the server coder was detected by the fork itself (clean hold, zero clobber) — the loom
   founding failure mode, lived inside loom's own build; fork's findings folded into spec §5a.
-  TCC Desktop deny recurred twice more (#2, #3); known one-command fix applied both times.
 - 2026-08-18 Orchestrator tryout fix: resolve_query gains '/'-boundary PATH-suffix matching —
   agents are taught `path.py::qualname` and on deep trees (conduit) that form resolved to zero.
   Live-verified: auth.py::login -> src/conduit/api/routes/auth.py::login; declare via suffix refs
@@ -45,11 +42,11 @@
   by bob's own smoke test. Product finding fixed same-hour (ace3cc0): init now gitignores the
   per-user loom.toml — alice's `git add -A` had committed her identity file and bob had to stash
   around it. 302 tests. Screenshot: docs/dashboard-two-users.png.
-- 2026-08-19 Competitor recon (12 agents, 2 workflows): graphify (107k★, YC S26, organic) =
-  complement+reposition — zero coordination in 61k LOC, hook surfaces provably disjoint (they gate
-  reads, we gate writes); Graft = complement on mechanism ("the agent did not pull. It grepped 38
-  times." — their own source); graphiti = pattern mine only (Zep CLA assigns patents — never
-  upstream). Report: research/competitor-recon.md, 12/12 claims adversarially re-verified.
+- 2026-08-19 Prior-art survey of neighbouring tools (graft, graphiti, graphify). Outcome that
+  reached the code: each is a **pattern influence only** — no upstream code was taken, and the
+  U1/U2/U3 fixes below were re-implemented from loom's own model. What loom took from where is
+  recorded publicly in `THIRD_PARTY_NOTICES.md` and `CREDITS.md`; the survey notes themselves are
+  not published.
 - 2026-08-19 Recon fixes landed (2a5332b, 316 tests): U1 cold≡incremental edge resolution — the
   edge-decay false-ALLOW caveat is FIXED and its docstring deleted (identity test pins it
   forever); U2 staleness-is-a-verdict (/state index_age + dashboard note + doctor WARN); U3

@@ -1,7 +1,8 @@
 """Frozen artifact — BUILD-SPEC §3. ID minting for loom.
 
 Portions derived from beads (https://github.com/steveyegge/beads), MIT License,
-Copyright (c) 2025 Beads Contributors. See THIRD_PARTY_NOTICES.md.
+Copyright (c) 2025 Beads Contributors. Full license:
+third_party/LICENSES/beads-MIT.txt. See THIRD_PARTY_NOTICES.md.
 
 stdlib only: this module is imported transitively by the PreToolUse hook budget path.
 """

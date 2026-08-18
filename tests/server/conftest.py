@@ -7,6 +7,7 @@ topology is deliberate:
     svc.py::login ──CALLS──▶ svc.py::AuthService/authenticate ──CALLS──▶ util.py::hash_pw
     svc.py       ──IMPORTS─▶ util.py                (radius 0: never expanded)
     models.py::User, iso.py::lonely                 (disjoint — safe re-declare ground)
+    svc.py::unrelated                               (shares only a FILE with the above)
 
 CONTAINS mirrors what M1 mints (`walk.py::_write_file_nodes`, tests/indexer EXPECTED_CONTAINS):
 src = container, dst = contained, one edge per nesting level, so the chain is
@@ -18,7 +19,7 @@ FULL refs — a bare `"AuthService"` would mint the id of a nonexistent FILE nod
 from __future__ import annotations
 
 import sqlite3
-from typing import Iterator
+from collections.abc import Iterator
 
 import pytest
 
@@ -33,6 +34,7 @@ NODES = [
     ("svc.py", "AuthService", "Class"),
     ("svc.py", "AuthService/authenticate", "Function"),
     ("svc.py", "login", "Function"),
+    ("svc.py", "unrelated", "Function"),
     ("util.py", "", "File"),
     ("util.py", "hash_pw", "Function"),
     ("models.py", "", "File"),
@@ -48,6 +50,7 @@ EDGES = [
     ("svc.py", "svc.py::AuthService", "CONTAINS"),
     ("svc.py::AuthService", "svc.py::AuthService/authenticate", "CONTAINS"),
     ("svc.py", "svc.py::login", "CONTAINS"),
+    ("svc.py", "svc.py::unrelated", "CONTAINS"),
     ("util.py", "util.py::hash_pw", "CONTAINS"),
     ("models.py", "models.py::User", "CONTAINS"),
     ("iso.py", "iso.py::lonely", "CONTAINS"),

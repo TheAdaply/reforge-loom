@@ -2,9 +2,14 @@
 name = "loom"
 version = "0.1.0"
 description = "loom — spec-driven coordination gate for multi-agent repos"
+readme = "README.md"
 requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "CREDITS.md",
+                 "third_party/LICENSES/*"]
+authors = [{ name = "TheAdaply" }]
 dependencies = [
-    "mcp>=2.0.0",
+    "mcp>=2.0.0,<3",
     "tree-sitter==0.26.0",
     "tree-sitter-python==0.25.0",
 ]
@@ -14,8 +19,29 @@ loom = "loom.cli.main:main"
 loom-gate = "loom.hook.gate:main"
 
 [dependency-groups]
-dev = ["pytest>=9.1.1"]
+dev = ["pytest>=9.1.1", "ruff>=0.14.0"]
 
 [build-system]
 requires = ["uv_build>=0.11.7,<0.12.0"]
 build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# Fixture repositories are deliberately odd sample code — duplicate defs, framework-shaped
+# defaults — because that is what the indexer has to survive. Linting them is meaningless.
+extend-exclude = ["tests/fixtures"]
+
+[tool.ruff.lint]
+# E501 is not in the select list yet: the frozen deny templates (BUILD-SPEC §7.4) and the DDL
+# are wire text whose line breaks are part of a contract, and ~30 older lines run a little
+# past 100. `line-length` above still states the house style for new code.
+select = ["E4", "E7", "E9", "F", "I", "B", "UP", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# The nine MCP tools use `= []` defaults deliberately — the MCP SDK reads the signature to build
+# the tool schema, and the bodies never mutate them (BUILD-SPEC §5).
+"src/loom/server/tools.py" = ["B006"]

@@ -48,8 +48,10 @@ NO_PLAN_TMPL = 'loom: no active plan for agent "{agent}". Before editing: write 
 
 _PLAN_COLS = ("id", "agent", "repo", "branch", "title", "spec_md", "status", "created", "updated")
 _HEADINGS = ("## Goal", "## Write targets", "## New/changed interfaces", "## Assumes", "## Out of scope")
+# Every stem here must exist in `templates/spec.md`, or it validates nothing. Checked by
+# tests/server/test_claims.py::test_every_placeholder_stem_is_in_the_shipped_template.
 _PLACEHOLDERS = ("[short imperative title", "[your agent id", "[Two sentences",
-                 "[Canonical node IDs", "[EXACT signatures", "[One line", "[Assumption")
+                 "[Canonical node IDs", "[EXACT signatures", "[One line")
 
 # Active-claim predicate (§2), used verbatim everywhere. LEFT JOIN so an orphaned claim
 # (plan row gone) is judged dead, never immortal.
@@ -148,10 +150,10 @@ def resolve_query(conn: sqlite3.Connection, repo: str, q: str) -> list[sqlite3.R
 def _fuzzy_tail(conn: sqlite3.Connection, repo: str, tail: str) -> list[sqlite3.Row]:
     """§5.2's last rung, behind U3's information gate: substring match or NOTHING.
 
-    Ported from graphiti (Apache-2.0) `graphiti_core/utils/maintenance/dedup_helpers.py`
-    — `_has_high_entropy` (:79-85) refuses the MinHash path for short, low-information
-    names, and `_resolve_with_similarity` (:246-250) escalates on ambiguity instead of
-    picking a winner; exact matching is never gated. loom keeps the posture and drops the
+    Posture adapted from graphiti (Apache-2.0) — no code copied; see CREDITS.md. Its
+    dedup helpers refuse the MinHash path for short, low-information names and escalate
+    on ambiguity instead of picking a winner; exact matching is never gated. loom keeps
+    that posture and drops the
     entropy arithmetic: over qualnames, `len` and `COUNT(*)` measure the same thing Shannon
     entropy was standing in for, and a threshold an agent can predict beats one it cannot.
 
@@ -264,17 +266,34 @@ def contains_closure(conn: sqlite3.Connection, repo: str, node_ids: set[str],
     return seen
 
 
+def _scope_for_conflicts(conn: sqlite3.Connection, repo: str, ids: set[str]) -> set[str]:
+    """The nodes a claim on `ids` is judged against: ancestors of `ids`, plus what `ids` contain.
+
+    Deliberately the UNION of the two single-direction closures, never one mixed walk. A
+    mixed walk pivots up through a File node and then back down into that file's other
+    children, so declaring one function would put every sibling function into the conflict
+    question and loom would coordinate at file granularity. A sibling is not my business.
+
+    This is the same question `check_node` asks at gate time (which walks up only, because
+    the gate already knows the exact node being edited), so declare and enforce agree.
+    """
+    if not ids:
+        return set()
+    return (contains_closure(conn, repo, ids, down=False)
+            | contains_closure(conn, repo, ids, up=False))
+
+
 def find_conflicts(conn: sqlite3.Connection, repo: str, write_set: set[str], read_set: set[str],
                    own_plan_ids: set[str], now: float) -> list[dict[str, Any]]:
     """Active foreign claims intersecting my sets. write-write blocks; mixed modes warn.
 
-    Each wanted node is judged over its CONTAINS closure (§4): declaring a whole file
+    Each wanted node is judged over its CONTAINS scope (§4): declaring a whole file
     intersects live claims on the symbols inside it, and declaring a symbol intersects a
-    live claim on its file/class. The closure widens the QUESTION only — the claim rows
+    live claim on its file/class. The scope widens the QUESTION only — the claim rows
     written by declare/rescope are still exactly the resolved targets plus §5.3's CALLS hop.
     """
-    w = contains_closure(conn, repo, write_set) if write_set else set()
-    r = contains_closure(conn, repo, read_set) if read_set else set()
+    w = _scope_for_conflicts(conn, repo, write_set)
+    r = _scope_for_conflicts(conn, repo, read_set)
     wanted = {n: "write" for n in w}
     wanted.update({n: "read" for n in r if n not in w})
     if not wanted:
@@ -492,8 +511,8 @@ def check_node(conn: sqlite3.Connection, *, repo: str, agent: str, node_id: str,
         return _decide(conn, repo, agent, "allow", "in_plan", "", node_id, mine["pid"])
     foreign = conn.execute(
         _OWNER_COLS + _ACTIVE_FROM + f"WHERE c.node_id IN ({marks}) AND c.mode='write' AND "
-        + _ACTIVE_WHERE + "AND p.agent<>? ORDER BY p.ttl_expires DESC LIMIT 1",
-        (*scope, now, agent)).fetchone()
+        + _ACTIVE_WHERE + "AND p.agent<>? AND p.repo=? ORDER BY p.ttl_expires DESC LIMIT 1",
+        (*scope, now, agent, repo)).fetchone()
     if foreign:
         owner = _conflict(foreign, "write-write")
         return _decide(conn, repo, agent, "deny", "foreign_claim",

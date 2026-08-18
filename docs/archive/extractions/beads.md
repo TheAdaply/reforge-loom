@@ -1,6 +1,6 @@
 # Extraction: beads (Go) → loom
 
-**Source clone root:** `/private/tmp/claude-501/-Users-cero-Desktop-PROJECTS-reforge-workspace-re-forge-irl-data-team-collab/6458dacd-1b63-4e60-82c7-dac1ea52eb51/scratchpad/vendor/beads`
+**Source clone root:** `<vendor-clone>/beads`
 All `file:line` provenance below is **relative to that root** (e.g. `internal/idgen/hash.go:55`).
 
 **Go module path:** `github.com/steveyegge/beads` (`go.mod:1`). Backend is Dolt/MySQL-dialect SQL, not SQLite — every SQL excerpt needs dialect translation (noted per item).

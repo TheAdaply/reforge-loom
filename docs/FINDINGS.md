@@ -215,6 +215,8 @@ ID: gate-F4 · `[GATE-VERIFIED]`.
   start/elapsed check or `signal.alarm(2)` on the main thread — that trips the fail-open path,
   **not** another socket timeout. Fail open loudly on trip.
 - **Regression test**: `tests/hook/test_gate.py`.
+- **STATUS: FIXED `490c642`** — `src/loom/hook/gate.py:174-186` runs the round trip on a daemon
+  thread behind a 2.5 s wall deadline that trips the loud fail-open path.
 
 ### P2-2 · A 10 MB source file costs ~5.9 s in the hook (past the ~2 s budget and the 5 s backstop) — silent degradation
 ID: gate-F5 · `[GATE-VERIFIED]`.
@@ -229,6 +231,8 @@ ID: gate-F5 · `[GATE-VERIFIED]`.
   the parse and return a file-level `GATE(rel, None)`. Generated/vendored files this size are
   ordinary and file-level gating is the safe degrade.
 - **Regression test**: `tests/hook/test_locator.py`.
+- **STATUS: FIXED `490c642`** — `src/loom/hook/locator.py:101-112`, `_PARSE_CAP_BYTES = 1_000_000`;
+  past the cap the locator skips the parse and degrades to a file-level target.
 
 ### P2-3 · `POST /gate` returns HTTP 500 on malformed bodies / non-string qualname (§6: "always HTTP 200")
 ID: claimsx-F3 · `[GATE-VERIFIED]`.
@@ -244,6 +248,9 @@ ID: claimsx-F3 · `[GATE-VERIFIED]`.
   coerce `qualname` to `str`-or-`None` (`qualname = q if isinstance(q, str) else None`) before the
   call. Always return the five-key 200 body.
 - **Regression test**: `tests/server/test_gate_endpoint.py`.
+- **STATUS: FIXED** — `gate_route` (`src/loom/server/app.py`) guards the JSON parse, treats a
+  non-object body as absent, and coerces a non-string `qualname` to `None`. Regression:
+  `tests/server/test_multirepo.py::test_a_malformed_gate_body_still_gets_the_five_frozen_keys`.
 
 ### P2-4 · The gate "fast read path" needs the SQLite WRITE lock — a concurrent `BEGIN IMMEDIATE` blocks it past 1.5 s, then raises
 ID: claimsx-F4 · `[GATE-VERIFIED]`.
@@ -488,8 +495,69 @@ be superseded by this collapse; the collapse landed directly, under the gate abo
 | E24 | `counts.nodes/edges` report post-LIMIT values | **SKIPPED** — reviewer's bar was "fix if ever surfaced"; it has not surfaced. |
 
 **Not touched, by standing order**: §7.4 deny templates, the §5/§6 wire shapes, and the DDL.
-P2-1/P2-2/P2-3/P2-4 and the P3 tail remain open — this was a simplification pass, and E22 was
-the one defect it was chartered to fix.
+At the close of the simplification pass P2-1..P2-4 and the P3 tail were all open — that pass was
+chartered to fix E22 and nothing else. **Since then P2-1, P2-2 and P2-3 have been fixed**; each
+carries its own STATUS line above, with the commit or the regression test that pins it. **P2-4
+remains open**, as does the P3 tail.
+
+**On the repro paths.** Every `scratchpad/...` path in this document names a file from a red-team
+session; those scripts are not published, and the durable artifact of each finding is the named
+regression test, not the script that first found it. Read the STATUS line's test to see the
+behaviour a finding pins.
+
+---
+
+## Council backlog
+
+Deferred items from the 2026-08-19 ten-dimension quality-council pass. The council's APPLY-NOW set
+landed in the "docs+quality" commit; everything below was tagged BACKLOG in its verification record
+(internal, not published — same rule as the repro scripts above). Each needs a decision or
+non-trivial churn; none is a regression. IDs are the council's.
+
+- **V9(b) — make the spec template reachable from a session.** Copy it to
+  `<repo_root>/.claude/loom-spec.md` at `loom init`, or add a `spec_template()` MCP tool, then
+  reword `NO_PLAN_TMPL` and the CLAUDE snippet. The template wording is §7.4-frozen and asserted
+  as a wire string in `tests/hook/test_gate.py`, so this needs an (a)-vs-(b) decision plus a
+  DECISIONS delta.
+- **V10 (code half) — configurable `EXCLUDE_DIRS`.** Split the set, drop `tests`/`frontend`/
+  `alembic` from the defaults, thread a repeatable `--exclude` flag. Behaviour change (walk cost,
+  claim semantics on test files); needs its own tests and a delta. The docs half (README MVP
+  limits + troubleshooting) has landed.
+- **I23 — dashboard on tokened servers.** `?token=` + sessionStorage or a 401 prompt; today
+  `--token` leaves the board on "reconnecting".
+- **I24 — doctor UX.** A fourth `SKIP` status (dependent rows currently read as extra failures),
+  a one-line verdict, `check_*` extraction.
+- **I26 — `docs/RECON-FIXES.md`.** U1/U2/U3 are load-bearing in 13 `src/` sites and defined only
+  in a five-line changelog entry.
+- **I27 — `docs/DESIGN-NOTES.md`.** The ~20 rationales worth keeping from the archived
+  extraction files.
+- **I28 — test-rig dedup.** One `live_server` conftest fixture replacing the copied
+  `free_port`/`wait_for_port`/boot-teardown rigs across the server tests.
+- **I29 — one scope rule, one home.** Hoist a shared `claim_scope(mode='declare'|'enforce')` so
+  declare and the gate cite one closure rule; move `check`'s resolution ladder from `tools.py`
+  into `claims.check_ref`.
+- **I30 — claims/gate hardening.** TTL ceiling clamp (constant choice + §7.4 delta); gate-audit
+  rotation; `decide()` returns its record (kills the `_REC` race at the wall deadline); retire the
+  fuzzy rung for full `path::qualname` inputs; `suggestions()` ranking in SQL instead of a
+  full-table scan.
+- **I31 — MCP `health` multi-repo parity.** `repo` param + `repos` list; wire delta D12.
+- **I32 — doctor staleness freshness.** `?fresh=1` bypass of the 5s index-age cache for the
+  one-shot command.
+- **I33 — BUILD-SPEC navigability.** `§`-prefix the headings so `grep '§5.3'` lands on the
+  definition, add a §0 TOC, split the milestone briefs out (frozen-doc edit + delta).
+- **I34 — readability refactors.** `_owner_query()` builder for the fragment-concatenation sites;
+  `Intake` NamedTuple; named resolution `Rung`s; `_epoch` → `db.from_iso`; `fabricSVG` three-way
+  split.
+- **I35 — demo packaging.** Move the demo out of the wheel or guard its fixture path; a
+  `loom-demo` console script; drop the one-flag argparse.
+- **I12 (remainder) — re-shoot `docs/dashboard-conduit-focus.png`** against
+  `tests/fixtures/pyrepo`; the current capture renders a real repository's symbol layout and is
+  embedded nowhere.
+- **Release-process decision (V2/V3 rider) — fresh-history publish.** The scrubbed personal
+  paths/identifiers and the archived internal records remain readable at commits at or before
+  `41dd16e`, and the pre-publish commits — this pass's included — carry session-URL trailers no
+  file edit can remove. A squash to one initial public commit, or `git filter-repo`, is the only
+  remediation; maintainer's call before any public flip.
 
 ---
 _Provenance: `scratchpad/redteam/{findings-gate,findings-claimsx,findings-indexer,findings-xm}.md`,

@@ -1,7 +1,9 @@
 """M1 fixtures: a writable copy of `tests/fixtures/pyrepo`, indexed into a tmp database.
 
-Helpers are exposed through the `graph` FIXTURE rather than importable module functions —
-`tests/` is not a package, so test modules cannot import each other or conftest by name.
+Helpers are exposed through the `graph` FIXTURE rather than importable module functions.
+`tests/` is not a package, so a helper reached by import would depend on pytest's rootdir
+insertion — which happens to work (`tests/server/conftest.py` is imported by name that way)
+but is not something to build a fixture contract on.
 """
 
 from __future__ import annotations

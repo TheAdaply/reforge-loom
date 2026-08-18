@@ -52,7 +52,7 @@ def test_every_tool_is_registered_and_annotated(tmp_path) -> None:
 
 def test_health_reports_the_seeded_graph(tmp_path) -> None:
     (h,) = run(server(tmp_path), [("health", {})])
-    assert h == {"ok": True, "repo": "demo", "nodes": 10, "active_plans": 0, "version": "0.1.0"}
+    assert h == {"ok": True, "repo": "demo", "nodes": 11, "active_plans": 0, "version": "0.1.0"}
 
 
 def test_resolve_nodes_matches_and_suggests(tmp_path) -> None:

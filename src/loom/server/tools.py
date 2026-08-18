@@ -96,6 +96,9 @@ def register(mcp: MCPServer, connection: Callable[[], sqlite3.Connection],
                              "suggestions": [] if matches else claims.suggestions(conn, in_repo, q)})
         return {"ok": True, "resolved": resolved}
 
+    # B006 by the letter and correct in fact: the MCP SDK reads these signatures to build the
+    # tool schemas, where `= []` is what declares an optional array. No body mutates one, and
+    # `pyproject.toml` records the per-file ignore.
     @mcp.tool()
     def declare_plan(agent: str, title: str, spec_md: str, write_targets: list[str],
                      assumes: list[str] = [], branch: str = "", repo: str = "",
