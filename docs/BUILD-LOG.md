@@ -16,3 +16,12 @@
   BUILD-LOG.md out-of-whitelist flag confirmed orchestrator-authored, benign.
 - 2026-08-18 README.md written by orchestrator, every documented command verified against the
   real CLI surface (--help captures + demo + ls run). MVP wrap.
+- 2026-08-18 Final simplification pass (commit 01ec907): applied 20, rejected 6 (reasons in
+  FINDINGS.md ledger). 249 -> 254 tests. E22 /state phantom-chip bug fixed + regression test.
+  ADJUDICATION (orchestrator): applier's S1 sequencing deviation ACCEPTED — shipping the query
+  collapse directly instead of landing the interim P1-5 patch first was the right call; the
+  controlled edge-dump gate (byte-identical pyrepo build, only by-design P1-5/P2-6 deltas) is
+  stronger verification than the interim-patch route, and both verifier and live boot confirm
+  behavior. P1-5/P2-6 are thereby CLOSED by S1. Remaining open by charter: P2-1..4, P3 tail.
+- 2026-08-18 TCC incident: Desktop access lost mid-pass (stale per-folder deny overriding FDA);
+  fixed live via tccutil reset SystemPolicyDesktopFolder com.apple.Terminal. Zero work lost.
