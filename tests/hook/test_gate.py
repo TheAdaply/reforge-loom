@@ -271,3 +271,18 @@ def test_hook_imports_neither_mcp_nor_starlette() -> None:
     r = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
     assert "hook-imports-ok" in r.stdout
+
+
+def test_loom_agent_and_config_env_overrides(tmp_path, monkeypatch):
+    """Several agents under one OS user need per-process identity (live-fire rig requirement)."""
+    from loom.hook.gate import load_config
+
+    cfg = tmp_path / "alt-config.toml"
+    cfg.write_text('server_url = "http://x"\nagent = "filed"\nrepo = "r"\nrepo_root = "/tmp"\n')
+    monkeypatch.setenv("LOOM_CONFIG", str(cfg))
+    monkeypatch.setenv("LOOM_AGENT", "override-agent")
+    loaded = load_config()
+    assert loaded is not None
+    assert loaded["agent"] == "override-agent"
+    monkeypatch.delenv("LOOM_AGENT")
+    assert load_config()["agent"] == "filed"

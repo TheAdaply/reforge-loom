@@ -25,12 +25,18 @@ _REC: dict = {}
 
 
 def load_config() -> dict | None:
-    """`~/.loom/config.toml` via tomllib; missing or incomplete -> None (fail-open)."""
+    """`~/.loom/config.toml` via tomllib; missing or incomplete -> None (fail-open).
+
+    Per-process overrides for the several-agents-one-OS-user case: `LOOM_CONFIG`
+    replaces the config path, `LOOM_AGENT` replaces the agent identity."""
     try:
-        with open(os.path.expanduser("~/.loom/config.toml"), "rb") as fh:
+        path = os.environ.get("LOOM_CONFIG") or os.path.expanduser("~/.loom/config.toml")
+        with open(path, "rb") as fh:
             cfg = tomllib.load(fh)
     except Exception:
         return None
+    if os.environ.get("LOOM_AGENT"):
+        cfg["agent"] = os.environ["LOOM_AGENT"]
     return cfg if all(isinstance(cfg.get(k), str) and cfg.get(k) for k in _CFG_KEYS) else None
 
 
