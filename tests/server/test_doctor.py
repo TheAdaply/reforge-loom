@@ -1,4 +1,4 @@
-"""MULTIREPO-SPEC §4 + §6.f — `loom doctor`, the eight-check wiring table.
+"""MULTIREPO-SPEC §4 + §6.f + ITERATION-2-SPEC D11 — `loom doctor`, the nine-check table.
 
 The rig is deliberately REAL end to end: a subprocess server over two served repos (only
 one of them indexed, so the WARN branch has ground to stand on), a checkout wired by the
@@ -31,7 +31,7 @@ from loom.server.db import connect, init_db
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 PYREPO = str(FIXTURES / "pyrepo")
 PYREPO2 = str(FIXTURES / "pyrepo2")
-CHECKS = ("config", "server", "repo match", "gate binary", "hook registered",
+CHECKS = ("config", "server", "auth", "repo match", "gate binary", "hook registered",
           "mcp registered", "gate round-trip", "index freshness")
 ROW = re.compile(r"^\s+(PASS|FAIL|WARN)\s\s(.+?)\s\s+(.*)$")
 
@@ -114,7 +114,7 @@ def doctor(monkeypatch: pytest.MonkeyPatch, capsys, root: Path) -> tuple[Rows, i
     cap = capsys.readouterr()
     rows: Rows = {m.group(2).strip(): (m.group(1), m.group(3))
                   for m in map(ROW.match, cap.out.splitlines()) if m}
-    assert list(rows) == list(CHECKS), cap.out    # all eight, always, in spec order
+    assert list(rows) == list(CHECKS), cap.out    # all nine, always, in spec order
     return rows, code, cap.err
 
 
@@ -133,10 +133,12 @@ def test_doctor_passes_every_check_on_a_wired_checkout(
     rows, code, _err = doctor(monkeypatch, capsys, root)
 
     assert code == 0
-    assert statuses(rows) == ["PASS"] * 8
+    assert statuses(rows) == ["PASS"] * 9
     assert str(root / ".claude" / "loom.toml") in rows["config"][1]
     assert "repo=alpha" in rows["config"][1] and "agent=aria" in rows["config"][1]
     assert "alpha, beta" in rows["server"][1]        # served names, printed verbatim
+    assert "auth=open" in rows["server"][1]          # D11: the mode, on the server row
+    assert rows["auth"] == ("PASS", "server is open; no token configured")
     assert "loom-gate" in rows["gate binary"][1]
     assert "exit 2" in rows["gate round-trip"][1]    # the real chain, not a stub
     assert re.match(r"\d+ node\(s\) indexed for 'alpha'", rows["index freshness"][1])
@@ -154,7 +156,7 @@ def test_doctor_warns_but_exits_zero_when_the_repo_is_unindexed(
     assert rows["index freshness"][0] == "WARN"
     assert "loom index --repo beta" in rows["index freshness"][1]
     assert rows["repo match"] == ("PASS", "'beta' is served")
-    assert statuses(rows, skip="index freshness") == ["PASS"] * 7
+    assert statuses(rows, skip="index freshness") == ["PASS"] * 8
 
 
 def test_doctor_fails_on_a_dead_server(doctor_server, tmp_path, monkeypatch, capsys) -> None:
@@ -166,7 +168,8 @@ def test_doctor_fails_on_a_dead_server(doctor_server, tmp_path, monkeypatch, cap
     rows, code, err = doctor(monkeypatch, capsys, root)
 
     assert code == 1 and "check(s) failed" in err
-    assert [rows[c][0] for c in ("server", "repo match", "index freshness")] == ["FAIL"] * 3
+    assert [rows[c][0] for c in ("server", "auth", "repo match",
+                                 "index freshness")] == ["FAIL"] * 4
     assert "unreachable" in rows["server"][1] and "loom serve" in rows["server"][1]
     # ...and the LOCAL half of the chain is still green, so the operator knows where to look.
     assert [rows[c][0] for c in ("config", "gate binary", "hook registered",
@@ -189,7 +192,7 @@ def test_doctor_fails_when_the_hook_is_not_registered(
     assert rows["hook registered"][0] == "FAIL"
     assert "run loom init" in rows["hook registered"][1]
     assert str(settings) in rows["hook registered"][1]
-    assert statuses(rows, skip="hook registered") == ["PASS"] * 7
+    assert statuses(rows, skip="hook registered") == ["PASS"] * 8
 
 
 def test_doctor_fails_a_checkout_that_was_never_initialized(

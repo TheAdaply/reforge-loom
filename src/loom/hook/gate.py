@@ -82,10 +82,19 @@ def load_config(start_dir: str | None = None) -> dict | None:
 
 
 def call_gate(cfg: dict, body: dict, timeout_s: float = 1.5) -> dict:
-    """POST the §6 wire body to `/gate`; urlopen raises on timeout / non-2xx / bad JSON."""
+    """POST the §6 wire body to `/gate`; urlopen raises on timeout / non-2xx / bad JSON.
+
+    ITERATION-2-SPEC §3: a non-empty `token` in the config is sent as the shared bearer.
+    It is OPTIONAL by construction — an absent key leaves byte-identical requests to the
+    ones an open server has always answered — and a 401 from a misconfigured client is a
+    non-2xx, i.e. it lands on the existing fail-open path. `loom doctor` is the loud path.
+    """
+    headers = {"Content-Type": "application/json"}
+    token = cfg.get("token")
+    if isinstance(token, str) and token:
+        headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(cfg["server_url"].rstrip("/") + "/gate", method="POST",
-                                 data=json.dumps(body).encode("utf-8"),
-                                 headers={"Content-Type": "application/json"})
+                                 data=json.dumps(body).encode("utf-8"), headers=headers)
     with urllib.request.urlopen(req, timeout=timeout_s) as resp:
         return json.loads(resp.read().decode("utf-8"))
 

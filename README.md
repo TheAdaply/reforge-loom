@@ -69,8 +69,9 @@ The dashboard grows a repo switcher (chips in the header) as soon as the server 
 uv run --directory <this-dir> loom doctor          # inside your checkout
 ```
 
-Eight checks, one PASS/FAIL/WARN row each, exit 0 unless something FAILs: the config file that
-wins discovery, the server's reachability and served repos, whether your configured repo is one of
+Nine checks, one PASS/FAIL/WARN row each, exit 0 unless something FAILs: the config file that
+wins discovery, the server's reachability and served repos (with its auth mode), whether the
+shared token your config carries satisfies that server, whether your configured repo is one of
 them, `loom-gate` on PATH, the PreToolUse hook in `.claude/settings.json`, the loom entry in
 `.mcp.json`, a **real** gate round-trip (a synthetic payload through the actual hook binary, which
 must exit 2), and whether your repo has an index yet (WARN, not FAIL — that one is a one-command
@@ -131,7 +132,7 @@ uv run --directory <this-dir> pytest tests -q     # 279 tests
 `tests/server/test_concurrency.py` is the one that matters: two HTTP clients race `declare_plan`
 on overlapping targets against a real subprocess server — exactly one wins, the loser gets the
 winner's spec. `test_multirepo.py` is its multi-repo twin (the same symbol name claimed in two
-served repos must not contend), and `test_doctor.py` runs the eight checks against a live server
+served repos must not contend), and `test_doctor.py` runs the nine checks against a live server
 and a checkout wired by the real `loom init`.
 
 ## Design & provenance

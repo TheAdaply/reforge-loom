@@ -189,7 +189,8 @@ def test_the_two_fixture_repos_share_a_path_and_no_symbol() -> None:
 
 def test_health_lists_every_served_repo_and_keeps_the_repo_key(two_repo_server) -> None:
     base, _db = two_repo_server
-    assert get(base + "/health") == {"ok": True, "repo": "alpha", "repos": ["alpha", "beta"]}
+    assert get(base + "/health") == {"ok": True, "repo": "alpha", "repos": ["alpha", "beta"],
+                                     "auth": "open"}          # D8: mode, always named
 
 
 def test_an_unserved_or_absent_repo_on_the_gate_is_advisory(two_repo_server) -> None:
@@ -317,7 +318,8 @@ def test_init_still_auto_selects_the_only_repo_of_a_single_repo_server(
     try:
         wait_for_port(port, proc)
         base = f"http://127.0.0.1:{port}"
-        assert get(base + "/health") == {"ok": True, "repo": "solo", "repos": ["solo"]}
+        assert get(base + "/health") == {"ok": True, "repo": "solo", "repos": ["solo"],
+                                         "auth": "open"}
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
         root = tmp_path / "checkout"
         root.mkdir()

@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -93,11 +94,17 @@ def _ref(row) -> str:
 
 
 def cmd_serve(args: argparse.Namespace) -> None:
-    """MULTIREPO-SPEC §1: one server, one db, N repos — `--repo-root` is repeatable."""
-    from loom.server.app import parse_repo_roots, serve
+    """MULTIREPO-SPEC §1: one server, one db, N repos — `--repo-root` is repeatable.
 
+    ITERATION-2-SPEC §3: `--token SECRET` (or `LOOM_TOKEN`) turns identity on. Both
+    spellings are resolved by the SERVER's `resolve_token`, so `loom serve` and
+    `python -m loom.server.app` cannot drift on precedence or on the empty-value error."""
+    from loom.server.app import parse_repo_roots, resolve_token, serve
+
+    token = ""
     try:
         repos = parse_repo_roots(args.repo_root or [], args.repo or "")
+        token = resolve_token(args.token)
     except ValueError as exc:
         _die(str(exc))
     # With several roots the db lands beside the FIRST one unless --db says otherwise;
@@ -110,7 +117,7 @@ def cmd_serve(args: argparse.Namespace) -> None:
         stats = _index(db, repo, repo_root, changed_only=None)
         print(f"loom: indexed {json.dumps({'repo': repo, **stats}, default=str)}", flush=True)
     # The repo salts are minted once, here, and echoed to every `loom init` (§11.19).
-    serve(args.host, args.port, db, repos)
+    serve(args.host, args.port, db, repos, token)
 
 
 def _index(db: str, repo: str, repo_root: str, changed_only: bool | None) -> dict:
@@ -139,9 +146,14 @@ def cmd_index(args: argparse.Namespace) -> None:
     print(json.dumps({"repo": repo, **stats}, default=str))
 
 
-def _get_json(url: str, timeout: float) -> dict:
-    """GET one JSON document; raises on timeout, non-2xx and malformed bodies alike."""
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
+def _get_json(url: str, timeout: float, token: str = "") -> dict:
+    """GET one JSON document; raises on timeout, non-2xx and malformed bodies alike.
+
+    A non-empty `token` is sent as §3's shared bearer — a 401 arrives as `HTTPError`, which
+    `doctor` catches by code to tell "wrong/missing credential" from "server is down"."""
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers),
+                                timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -153,16 +165,23 @@ def _served(data: dict) -> list[str]:
         ([str(data["repo"])] if data.get("repo") else [])
 
 
-def _health(server: str) -> list[str]:
-    """Ping `GET /health` for the served repo salts — one spelling, minted at serve (§11.19)."""
+def _auth_mode(data: dict) -> str:
+    """D8: `"token"` iff `/health` says so. Anything else — including a body from a server
+    older than this spec, which has no `auth` key at all — reads as an OPEN server."""
+    return "token" if str(data.get("auth") or "") == "token" else "open"
+
+
+def _health(server: str) -> dict:
+    """Ping `GET /health` and return the WHOLE body: the served repo salts (one spelling,
+    minted at serve — §11.19) plus D8's `auth` mode. `/health` stays open on a tokened
+    server precisely so this call can happen before the caller owns a credential."""
     try:
         data = _get_json(server.rstrip("/") + "/health", 5)
     except Exception as exc:
         _die(f"cannot reach {server}/health ({type(exc).__name__}); is `loom serve` running?")
-    served = _served(data)
-    if not data.get("ok") or not served:
+    if not data.get("ok") or not _served(data):
         _die(f"{server}/health did not name a repo; refusing to guess the id salt")
-    return served
+    return data
 
 
 def _pick_repo(server: str, asked: str | None, served: list[str]) -> str:
@@ -218,7 +237,7 @@ def _append_snippet(repo_root: str) -> bool:
     return True
 
 
-def _merge_mcp_json(repo_root: str, server: str) -> bool:
+def _merge_mcp_json(repo_root: str, server: str, token: str = "") -> bool:
     """Register loom's MCP tool surface in the repo's .mcp.json (idempotent MERGE).
 
     Without this the protocol is a trap: CLAUDE.md tells agents to declare_plan and
@@ -233,6 +252,11 @@ def _merge_mcp_json(repo_root: str, server: str) -> bool:
             _die(f"{path} is not a JSON object; fix it by hand — loom will not overwrite it")
     servers = data.setdefault("mcpServers", {})
     entry = {"type": "http", "url": server.rstrip("/") + "/mcp"}
+    if token:
+        # D10: the MCP client is a THIRD caller (after the hook and the CLI) and the only
+        # one loom does not run itself — Claude Code reads this file, so the credential has
+        # to travel with the registration or `/mcp` answers it 401 forever.
+        entry["headers"] = {"Authorization": f"Bearer {token}"}
     if servers.get("loom") == entry:
         return False
     servers["loom"] = entry
@@ -242,21 +266,34 @@ def _merge_mcp_json(repo_root: str, server: str) -> bool:
     return True
 
 
-def _write_config(path: str, server: str, agent: str, repo: str, repo_root: str) -> None:
-    """Write the 4-key §7.5 config TOML, creating its directory."""
+def _write_config(path: str, server: str, agent: str, repo: str, repo_root: str,
+                  token: str = "") -> None:
+    """Write the 4-key §7.5 config TOML, creating its directory.
+
+    D10 adds an OPTIONAL fifth key. It is omitted entirely for an open server, so the file
+    an open checkout carries is byte-identical to the one it carried before this spec —
+    and `gate.load_config` keeps requiring exactly the four mandatory keys."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(f'server_url = "{server}"\nagent = "{agent}"\nrepo = "{repo}"\n'
-                 f'repo_root = "{repo_root}"\n')
+                 f'repo_root = "{repo_root}"\n' + (f'token = "{token}"\n' if token else ""))
 
 
 def cmd_init(args: argparse.Namespace) -> None:
-    _no_empty(args, "server", "agent", "repo")
+    _no_empty(args, "server", "agent", "repo", "token")
     repo_root = os.path.abspath(args.repo_root) if args.repo_root else os.getcwd()
     gate = shutil.which("loom-gate")
     if not gate:
         _die("`loom-gate` is not on PATH; install loom (uv sync) and re-run loom init")
-    repo = _pick_repo(args.server, args.repo, _health(args.server))
+    health = _health(args.server)
+    repo = _pick_repo(args.server, args.repo, _served(health))
+    token = args.token or ""
+    # §3: the token is required IFF the server says it is. Checked here, before the first
+    # file is written, so a forgotten --token leaves no half-wired checkout behind — and
+    # never accepted silently against an open server that would ignore it.
+    if _auth_mode(health) == "token" and not token:
+        _die(f"{args.server} requires a token — re-run loom init with --token SECRET "
+             "(ask whoever runs `loom serve` for the team's shared secret)")
     agent = args.agent or os.environ.get("USER") or "agent"
     home = os.path.expanduser("~/.loom")
     # PER-REPO config alongside the settings.json this verb already writes: the ONE global
@@ -264,10 +301,10 @@ def cmd_init(args: argparse.Namespace) -> None:
     # pointed the first repo's gate at the second repo's server. The global copy stays for
     # backward compat; `gate.load_config` prefers the per-repo file it walks up to.
     local_cfg = os.path.join(repo_root, ".claude", "loom.toml")
-    _write_config(local_cfg, args.server, agent, repo, repo_root)
-    _write_config(os.path.join(home, "config.toml"), args.server, agent, repo, repo_root)
+    _write_config(local_cfg, args.server, agent, repo, repo_root, token)
+    _write_config(os.path.join(home, "config.toml"), args.server, agent, repo, repo_root, token)
     added = _merge_settings(repo_root, gate)
-    mcp_added = _merge_mcp_json(repo_root, args.server)
+    mcp_added = _merge_mcp_json(repo_root, args.server, token)
     appended = _append_snippet(repo_root)
     # A mistyped command path leaves the gate silently disabled — prove exit 2 (§7.5).
     try:
@@ -283,7 +320,8 @@ def cmd_init(args: argparse.Namespace) -> None:
           f"  hooks     {os.path.join(repo_root, '.claude', 'settings.json')} "
           f"({added} group(s) added, gate verified)\n"
           f"  mcp       {os.path.join(repo_root, '.mcp.json')} "
-          f"({'loom server added' if mcp_added else 'already registered'})\n"
+          f"({'loom server added' if mcp_added else 'already registered'}"
+          f"{', with the shared-token header' if token else ''})\n"
           f"  protocol  {'appended to' if appended else 'already in'} "
           f"{os.path.join(repo_root, 'CLAUDE.md')}\n"
           f"  spec      {os.path.join(_templates(), 'spec.md')}\n\n{BYPASS_NOTE}")
@@ -316,13 +354,14 @@ def _json_file(path: str | None) -> dict:
 
 
 def cmd_doctor(args: argparse.Namespace) -> None:
-    """MULTIREPO-SPEC §4: eight checks over ONE checkout, PASS/FAIL/WARN, exit 0 iff no FAIL.
+    """MULTIREPO-SPEC §4 + ITERATION-2-SPEC D11: nine checks over ONE checkout,
+    PASS/FAIL/WARN, exit 0 iff no FAIL.
 
     The sellability tool — "is loom actually wired up here?" answered without reading any
     docs. Every check catches its own failure and degrades to a FAIL row: the table always
-    prints all eight, because the row that explains the breakage is usually not the first
-    one to fail. `loom-gate` runs for real (check 7), so a green table means the whole
-    chain — config discovery, hook binary, server, claim decision — just worked.
+    prints all nine, because the row that explains the breakage is usually not the first
+    one to fail. `loom-gate` runs for real (check 8), so a green table means the whole
+    chain — config discovery, hook binary, server, auth, claim decision — just worked.
     """
     from loom.hook import gate as hook_gate     # lazy: keeps `loom serve`'s import graph thin
 
@@ -340,32 +379,55 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         f"{cfg_path} (repo={cfg['repo']}, agent={cfg['agent']})" if cfg else
         f"no usable config at {cfg_path} — run `loom init --server URL` in this repo")
 
-    # 2 server
+    # 2 server — `/health` is the one route a tokened server leaves open, so this row is
+    # readable even when every other server-side row is about to say 401.
     served: list[str] = []
+    mode = "open"
     detail = "skipped — no config to name a server"
     if cfg:
         try:
             data = _get_json(cfg["server_url"].rstrip("/") + "/health", 3)
             served = _served(data)
-            detail = f"{cfg['server_url']} serves: {', '.join(served) or '(nothing)'}"
+            mode = _auth_mode(data)
+            detail = (f"{cfg['server_url']} serves: {', '.join(served) or '(nothing)'} "
+                      f"(auth={mode})")
         except Exception as exc:
             detail = (f"{cfg['server_url']} unreachable ({type(exc).__name__}) — "
                       "is `loom serve` running?")
     row("server", bool(served), detail)
 
-    # 3 repo match — a salt the server does not serve is answered `allow/unindexed`
+    # 3 auth (D11) — identity is opt-in, so the only failure that matters is a server that
+    # WANTS a credential this checkout cannot produce. Probed over `/state` rather than
+    # trusted from `/health`'s advertisement: a token that is present but WRONG looks
+    # identical in the config and lands as the same 401 every real call would get.
+    cfg_token = str(cfg.get("token") or "") if cfg else ""
+    ok, detail = False, "skipped — no reachable server to ask"
+    if cfg and served:
+        try:
+            _get_json(cfg["server_url"].rstrip("/") + "/state", 3, cfg_token)
+            ok = True
+            detail = ("shared token accepted" if cfg_token else
+                      "server is open; no token configured")
+        except urllib.error.HTTPError as exc:
+            detail = ("server requires a token — re-run loom init with --token"
+                      if exc.code == 401 else f"/state answered HTTP {exc.code}")
+        except Exception as exc:
+            detail = f"/state unreachable ({type(exc).__name__})"
+    row("auth", ok, detail)
+
+    # 4 repo match — a salt the server does not serve is answered `allow/unindexed`
     # forever: the gate looks alive and checks nothing. That is the silent failure.
     repo = cfg["repo"] if cfg else ""
     row("repo match", bool(repo) and repo in served,
         f"'{repo}' is served" if repo and repo in served else
         f"config repo '{repo}' is not served ({', '.join(served) or 'nothing served'})")
 
-    # 4 gate binary
+    # 5 gate binary
     gate_bin = shutil.which("loom-gate") or ""
     row("gate binary", bool(gate_bin) and os.access(gate_bin, os.X_OK),
         gate_bin or "`loom-gate` is not on PATH — install loom (uv sync) and re-run loom init")
 
-    # 5 hook registered — match the COMMAND SUBSTRING, not today's `shutil.which` path: a
+    # 6 hook registered — match the COMMAND SUBSTRING, not today's `shutil.which` path: a
     # moved venv is a stale hook to fix, but an unmoved one must not read as unregistered.
     settings = _walk_up(start, ".claude", "settings.json")
     hooked = any("loom-gate" in str(hook.get("command") or "")
@@ -376,7 +438,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         f"no loom-gate PreToolUse hook in {settings or '<no .claude/settings.json>'} "
         "— run loom init")
 
-    # 6 mcp registered
+    # 7 mcp registered
     mcp_path = _walk_up(start, ".mcp.json")
     want = cfg["server_url"].rstrip("/") + "/mcp" if cfg else ""
     entry = (_json_file(mcp_path).get("mcpServers") or {}).get("loom") or {}
@@ -385,7 +447,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         else f"mcpServers.loom.url is {url or 'absent'} in "
              f"{mcp_path or '<no .mcp.json>'}, expected {want or '<no config>'}")
 
-    # 7 gate round-trip — the §7.5 payload is denied HOOK-side, so this proves the chain
+    # 8 gate round-trip — the §7.5 payload is denied HOOK-side, so this proves the chain
     # without depending on index or claim state (and stays honest with a dead server).
     ok, detail = False, "skipped — needs a config and `loom-gate` on PATH"
     if cfg and gate_bin:
@@ -400,13 +462,13 @@ def cmd_doctor(args: argparse.Namespace) -> None:
             detail = f"could not run {gate_bin} ({type(exc).__name__})"
     row("gate round-trip", ok, detail)
 
-    # 8 index freshness — WARN, not FAIL: an unindexed repo gates nothing, but it is a
+    # 9 index freshness — WARN, not FAIL: an unindexed repo gates nothing, but it is a
     # one-command fix and never a reason to fail a CI-style check.
     ok, warn, detail = False, False, "skipped — server or repo unknown"
     if cfg and repo in served and served:
         try:
             counts = _get_json(f"{cfg['server_url'].rstrip('/')}/state?repo="
-                               f"{urllib.parse.quote(repo)}", 3).get("counts") or {}
+                               f"{urllib.parse.quote(repo)}", 3, cfg_token).get("counts") or {}
             nodes = int(counts.get("nodes") or 0)
             ok, warn = nodes > 0, nodes == 0
             detail = (f"{nodes} node(s) indexed for '{repo}'" if nodes else
@@ -504,11 +566,15 @@ VERBS = {
                                 "help": "PATH or NAME=PATH; repeat for several repos"}),
                ("--repo", {"default": "", "help": "rename the single repo of a one-root server"}),
                ("--host", {"default": "0.0.0.0"}), ("--port", {"type": int, "default": 8790}),
-               ("--db", {"help": "recommended when serving several repos"})]),
+               ("--db", {"help": "recommended when serving several repos"}),
+               ("--token", {"help": "shared secret required on /gate, /state and /mcp; "
+                                    "env LOOM_TOKEN is the fallback (flag wins)"})]),
     "init": (cmd_init, "register the PreToolUse gate in this repo",
              [("--server", {"required": True}), ("--agent", {}),
               ("--repo", {"help": "required when the server serves several repos"}),
-              ("--repo-root", {"help": "defaults to the current directory"})]),
+              ("--repo-root", {"help": "defaults to the current directory"}),
+              ("--token", {"help": "the server's shared secret; required iff /health "
+                                   "reports auth=token"})]),
     "doctor": (cmd_doctor, "check this checkout's loom wiring end to end",
                [("--repo-root", {"help": "defaults to the current directory"})]),
     "index": (cmd_index, "index a repo into the loom graph",
