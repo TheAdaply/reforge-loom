@@ -98,11 +98,20 @@ def enclosing_qualname(source: str, start_line: int, end_line: int) -> str | Non
     return min(inside, key=lambda s: s[2] - s[1])[0] if inside else None
 
 
+# Files above this size are gated at FILE level without parsing: an AST parse of a 10 MB
+# file costs multiple seconds inside a ~2 s hook budget (red-team gate-F5). Coarser claim,
+# same protection, bounded latency.
+_PARSE_CAP_BYTES = 1_000_000
+
+
 def _edit(rel: str, repo_root: str, tool_input: dict) -> Located:
     """Edit: find `old_string` on disk, then fall to the narrowest enclosing claimable span."""
     old = _field(tool_input, "old_string")
     try:
-        with open(_abs(rel, repo_root), encoding="utf-8", errors="replace") as fh:
+        path = _abs(rel, repo_root)
+        if os.stat(path).st_size > _PARSE_CAP_BYTES:
+            return Located("gate", rel, None)
+        with open(path, encoding="utf-8", errors="replace") as fh:
             source = fh.read()
     except OSError:
         return Located("gate", rel, None)

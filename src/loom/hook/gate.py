@@ -11,6 +11,7 @@ import fcntl
 import json
 import os
 import sys
+import threading
 import tomllib
 import urllib.request
 from datetime import UTC, datetime
@@ -135,6 +136,14 @@ def audit(rec: dict) -> None:
         pass
 
 
+def _safe_decide(payload: dict, cfg: dict) -> tuple[int, str, str] | BaseException:
+    """decide() for the deadline worker: exceptions become values, never thread-deaths."""
+    try:
+        return decide(payload, cfg)
+    except BaseException as exc:  # noqa: BLE001 — relayed to main's fail-open
+        return exc
+
+
 def main() -> None:
     """The console script: every path lands on exit 0 or exit 2 — never 1 (§7.3)."""
     try:
@@ -148,8 +157,24 @@ def main() -> None:
             # Human-only escape hatch, documented solely in `loom init` output (§7.4).
             _REC.update(decision="bypass", case="bypass")
             verdict = (0, "", "loom: gate bypassed by LOOM_BYPASS; recorded in ~/.loom/gate-audit.jsonl")
+        elif cfg is None:
+            verdict = fail_open("no_config")
         else:
-            verdict = fail_open("no_config") if cfg is None else decide(payload, cfg)
+            # HARD wall deadline over the whole decision. The 1.5 s socket timeout only
+            # bounds idle reads — a server dripping one byte per second holds the edit
+            # forever (red-team gate-F4). The worker is a daemon: on timeout we fail open
+            # and exit; the lingering thread dies with the process.
+            box: list[tuple[int, str, str] | BaseException] = []
+            worker = threading.Thread(
+                target=lambda: box.append(_safe_decide(payload, cfg)), daemon=True)
+            worker.start()
+            worker.join(2.5)
+            if not box:
+                verdict = fail_open("wall_deadline")
+            elif isinstance(box[0], BaseException):
+                verdict = fail_open(type(box[0]).__name__)
+            else:
+                verdict = box[0]
     except BaseException as exc:  # noqa: BLE001 — fail-open IS the contract
         verdict = fail_open(type(exc).__name__)
     code, out, err = verdict

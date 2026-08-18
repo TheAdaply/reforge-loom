@@ -79,7 +79,6 @@ def _ref(row) -> str:
 
 
 def cmd_serve(args: argparse.Namespace) -> None:
-    from loom.indexer.walk import index_repo
     from loom.server.app import serve
 
     repo_root = os.path.abspath(args.repo_root)
@@ -87,27 +86,32 @@ def cmd_serve(args: argparse.Namespace) -> None:
     db = _db_of(args, repo_root)
     # PLAN §4.5: `loom serve` starts server PLUS indexer — one process, no separate
     # `loom index` step before first use. Incremental thereafter via mtime+hash.
-    init_db(db)
-    conn = connect(db)
-    has_nodes = conn.execute("SELECT 1 FROM nodes LIMIT 1").fetchone() is not None
-    stats = index_repo(conn, repo, repo_root, changed_only=has_nodes)
-    conn.close()
+    stats = _index(db, repo, repo_root, changed_only=None)
     print(f"loom: indexed {json.dumps(stats, default=str)}", flush=True)
     # The repo salt is minted once, here, and echoed to every `loom init` (§11.19).
     serve(args.host, args.port, db, repo, repo_root)
 
 
-def cmd_index(args: argparse.Namespace) -> None:
+def _index(db: str, repo: str, repo_root: str, changed_only: bool | None) -> dict:
+    """Shared index body for serve-at-boot and `loom index`. changed_only=None means
+    "full on a fresh db, incremental once nodes exist" (the serve-boot rule)."""
     from loom.indexer.walk import index_repo
 
+    init_db(db)
+    conn = connect(db)
+    if changed_only is None:
+        changed_only = conn.execute("SELECT 1 FROM nodes LIMIT 1").fetchone() is not None
+    stats = index_repo(conn, repo, repo_root, changed_only=changed_only)
+    conn.close()
+    return stats
+
+
+def cmd_index(args: argparse.Namespace) -> None:
     repo_root = os.path.abspath(args.repo_root)
     # Mirror `serve`: a team that pinned a stable salt with `serve --repo NAME` must be able
     # to re-index under it, or the served graph goes permanently stale (§11.19).
     repo = args.repo or _repo_of(repo_root)
-    init_db(_db_of(args, repo_root))
-    conn = connect(_db_of(args, repo_root))
-    stats = index_repo(conn, repo, repo_root, changed_only=args.changed)
-    conn.close()
+    stats = _index(_db_of(args, repo_root), repo, repo_root, changed_only=args.changed)
     print(json.dumps({"repo": repo, **stats}, default=str))
 
 

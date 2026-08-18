@@ -81,7 +81,7 @@ def build_server(db_path: str, repo: str, repo_root: str) -> MCPServer:
         version="0.1.0",
     )
 
-    register(mcp, {"conn": conn, "repo": repo, "repo_root": repo_root, "db_path": db_path})
+    register(mcp, {"conn": conn, "repo": repo})
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health_route(request: Request) -> Response:

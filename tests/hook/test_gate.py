@@ -355,3 +355,68 @@ def test_load_config_prefers_the_per_repo_file_over_the_global_one(tmp_path, mon
     assert config_start_dir({}) is None
     assert config_start_dir({"tool_input": {"file_path": "rel/path.py"}}) is None
     assert os.path.isdir(str(repo))
+
+
+def test_wall_deadline_beats_dripping_server(tmp_path, monkeypatch):
+    """gate-F4: a server dripping bytes must not hold the edit past the wall deadline (fail-open)."""
+    import http.server
+    import json
+    import os
+    import socketserver
+    import subprocess
+    import sys
+    import threading
+    import time as _time
+
+    class Drip(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "1000")
+            self.end_headers()
+            for _ in range(60):
+                try:
+                    self.wfile.write(b" ")
+                    self.wfile.flush()
+                except Exception:
+                    return
+                _time.sleep(1.0)
+
+        def log_message(self, *a):
+            pass
+
+    srv = socketserver.TCPServer(("127.0.0.1", 0), Drip)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    target = repo_root / "m.py"
+    target.write_text("def f():\n    return 1\n")
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text(f'server_url = "http://127.0.0.1:{port}"\nagent = "a"\nrepo = "r"\n'
+                   f'repo_root = "{repo_root}"\n')
+    payload = {"tool_name": "Edit",
+               "tool_input": {"file_path": str(target), "old_string": "return 1",
+                              "new_string": "return 2"}}
+    env = {**os.environ, "LOOM_CONFIG": str(cfg), "HOME": str(tmp_path)}
+    t0 = _time.monotonic()
+    proc = subprocess.run([sys.executable, "-m", "loom.hook.gate"], input=json.dumps(payload),
+                         capture_output=True, text=True, timeout=15, env=env)
+    elapsed = _time.monotonic() - t0
+    srv.shutdown()
+    assert proc.returncode == 0, proc.stderr
+    assert "wall_deadline" in proc.stderr or "failed open" in proc.stderr
+    assert "systemMessage" in proc.stdout
+    assert elapsed < 8, f"gate took {elapsed:.1f}s against a dripping server"
+
+
+def test_locator_size_cap_falls_to_file_level(tmp_path):
+    """gate-F5: files above the parse cap gate at FILE level instead of stalling on ast.parse."""
+    from loom.hook.locator import _PARSE_CAP_BYTES, locate
+
+    big = tmp_path / "big.py"
+    big.write_text("def f():\n    return 1\n" + ("# pad\n" * (_PARSE_CAP_BYTES // 6)))
+    assert big.stat().st_size > _PARSE_CAP_BYTES
+    loc = locate("Edit", {"file_path": str(big), "old_string": "return 1",
+                          "new_string": "return 2"}, str(tmp_path))
+    assert loc.action == "gate" and loc.qualname is None  # file-level, no parse
