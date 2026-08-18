@@ -68,6 +68,71 @@ def test_expanded_neighbour_is_owner_editable_without_rescope(
     assert (d["decision"], d["case"]) == ("allow", "in_plan")
 
 
+# --------------------------------------------------------------------- hierarchy (P0-2)
+
+
+def test_a_file_claim_covers_every_symbol_it_contains(gconn: sqlite3.Connection) -> None:
+    """claimsx-F1 leg (b): the owner of a file-level claim was denied `out_of_scope` on
+    every symbol-narrowed Edit inside the file it had just declared."""
+    a = declare(gconn, "aria", ["svc.py"])
+    assert a["claimed_write"] == [nid("svc.py")]          # the CLAIM stays file-level ...
+    for qual in (None, "login", "AuthService", "AuthService/authenticate"):
+        d = claims.gate_decision(gconn, repo=REPO, agent="aria", path="svc.py",
+                                 qualname=qual, now=now_s())
+        assert (d["decision"], d["case"]) == ("allow", "in_plan"), qual
+        assert d["plan_id"] == a["plan_id"]               # ... the JUDGEMENT walks CONTAINS
+
+
+def test_a_foreign_file_claim_blocks_a_symbol_edit_two_levels_inside_it(
+        gconn: sqlite3.Connection) -> None:
+    a = declare(gconn, "aria", ["svc.py"])
+    declare(gconn, "bo", [USER], title="bo plan")         # bo has a plan, so this is not step 5
+    d = claims.gate_decision(gconn, repo=REPO, agent="bo", path="svc.py",
+                             qualname="AuthService/authenticate", now=now_s())
+    assert (d["decision"], d["case"]) == ("deny", "foreign_claim")
+    assert d["plan_id"] == a["plan_id"] and d["owner"]["owner_agent"] == "aria"
+    assert d["owner"]["ref"] == "svc.py"                  # the deny names the claimed container
+
+
+def test_declaring_a_file_conflicts_with_a_live_claim_on_a_symbol_inside_it(
+        gconn: sqlite3.Connection) -> None:
+    """claimsx-F1 leg (a), the silent one: bo declared the whole file over aria's live
+    symbol claim and BOTH were then cleared to write the same bytes."""
+    a = declare(gconn, "aria", [AUTH])
+    r = declare(gconn, "bo", ["svc.py"])
+    assert r["ok"] is False and r["reason"] == "conflict"
+    assert {c["kind"] for c in r["conflicts"]} == {"write-write"}
+    assert a["plan_id"] in {c["owner_plan_id"] for c in r["conflicts"]}
+    assert gconn.execute("SELECT COUNT(*) FROM plans").fetchone()[0] == 1   # nothing landed
+
+
+def test_declaring_a_symbol_conflicts_with_a_live_claim_on_its_file(
+        gconn: sqlite3.Connection) -> None:
+    declare(gconn, "aria", ["svc.py"])
+    r = declare(gconn, "bo", [AUTH])                      # two CONTAINS levels below svc.py
+    assert r["ok"] is False and r["reason"] == "conflict"
+    assert nid("svc.py") in {c["node_id"] for c in r["conflicts"]}
+
+
+def test_a_class_claim_and_a_method_claim_are_the_same_ground(
+        gconn: sqlite3.Connection) -> None:
+    """xm-F4 / claimsx repro4-A: aria owned the class, bo owned a method inside it, and
+    `list_claims` showed two owners on overlapping ground with both gates saying in_plan."""
+    a = declare(gconn, "aria", ["svc.py::AuthService"])
+    assert declare(gconn, "bo", [AUTH])["reason"] == "conflict"
+    d = claims.gate_decision(gconn, repo=REPO, agent="aria", path="svc.py",
+                             qualname="AuthService/authenticate", now=now_s())
+    assert (d["decision"], d["case"], d["plan_id"]) == ("allow", "in_plan", a["plan_id"])
+
+
+def test_contains_closure_walks_both_directions_transitively(gconn: sqlite3.Connection) -> None:
+    up = claims.contains_closure(gconn, REPO, {nid(AUTH)}, down=False)
+    assert up == {nid(AUTH), nid("svc.py::AuthService"), nid("svc.py")}
+    down = claims.contains_closure(gconn, REPO, {nid("svc.py")}, up=False)
+    assert down == {nid("svc.py"), nid("svc.py::AuthService"), nid(AUTH), nid(LOGIN)}
+    assert claims.contains_closure(gconn, REPO, {nid(LONELY)}) == {nid(LONELY), nid("iso.py")}
+
+
 # --------------------------------------------------------------------- conflicts
 
 

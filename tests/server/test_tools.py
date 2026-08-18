@@ -105,6 +105,42 @@ def test_full_lifecycle_over_the_tool_surface(tmp_path) -> None:
     assert after["allow"] is False and after["case"] == "no_plan"   # claim is gone
 
 
+def test_check_resolves_a_bare_symbol_name_instead_of_allowing_it_as_a_new_path(
+        tmp_path) -> None:
+    """claimsx-F2: `check(agent, "authenticate")` fell through to the PATH ladder, matched
+    no indexed node and answered `new_path` allow over a live foreign write claim."""
+    mcp = server(tmp_path)
+    run(mcp, [("declare_plan", {"agent": "aria", "title": "t", "spec_md": SPEC,
+                                "write_targets": [AUTH]})])
+    bare, qual, ident = run(mcp, [
+        ("check", {"agent": "bo", "node": "authenticate"}),
+        ("check", {"agent": "bo", "node": "AuthService/authenticate"}),
+        ("check", {"agent": "bo", "node": AUTH})])
+    for r in (bare, qual, ident):
+        assert r["allow"] is False and r["case"] == "foreign_claim"
+        assert r["owner"]["owner_agent"] == "aria"
+    # and the owner is still cleared through the same ladder
+    (own,) = run(mcp, [("check", {"agent": "aria", "node": "authenticate"})])
+    assert own["allow"] is True and own["case"] == "in_plan"
+
+
+def test_check_denies_needs_resolution_when_it_cannot_pin_one_node(tmp_path) -> None:
+    mcp = server(tmp_path)
+    unknown, absent_id, ambiguous, new_file = run(mcp, [
+        ("check", {"agent": "bo", "node": "no_such_symbol"}),
+        ("check", {"agent": "bo", "node": "n-zzzzzzzz"}),
+        ("check", {"agent": "bo", "node": "auth"}),     # matches AuthService AND its method
+        ("check", {"agent": "bo", "node": "brand/new.py"})])
+    assert ambiguous["case"] == "needs_resolution"
+    assert set(ambiguous["candidates"]) == {"svc.py::AuthService", AUTH}
+    for r in (unknown, absent_id, ambiguous):
+        assert r["allow"] is False and r["case"] == "needs_resolution"
+        assert "resolve_nodes" in r["message"] and r["node_id"] is None and r["owner"] is None
+    assert 0 < len(unknown["candidates"]) <= 5          # §5.2 suggestions, additive key
+    # A path-shaped argument still reaches §6's path ladder: a brand-new file is allowed.
+    assert new_file == {"allow": True, "case": "new_path", "plan_id": None}
+
+
 def test_conflict_response_embeds_the_owner_spec(tmp_path) -> None:
     mcp = server(tmp_path)
     args = {"title": "t", "spec_md": SPEC, "write_targets": [USER]}

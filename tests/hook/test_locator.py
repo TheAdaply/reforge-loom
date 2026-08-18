@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from loom.hook.locator import (
@@ -137,6 +138,45 @@ def test_replace_in_files_scoping(tmp_path: Path) -> None:
     assert dry.action == "pass"
     assert (one.action, one.path, one.qualname) == ("gate", "src/m.py", None)
     assert (wide.action, wide.message) == ("deny_local", UNSCOPED_TMPL)
+
+
+def test_symlinked_repo_spelling_gates_identically(tmp_path: Path) -> None:
+    """gate-F1: one file, one identity — a symlink-spelled repo must NOT slip through unchecked.
+
+    `tmp_path` is already realpath'd on macOS, so the symlink has to be built explicitly:
+    that is structurally why the rest of this suite cannot see the bug.
+    """
+    real = _write(tmp_path)  # <tmp>/repo, canonical spelling
+    link = str(tmp_path / "repo_link")
+    os.symlink(real, link)
+    old = "        return inner()"
+    # D1: repo_root recorded through the symlink, the tool sends the resolved real path.
+    d1 = locate("Edit", {"file_path": real + "/src/m.py", "old_string": old}, link)
+    # D2: repo_root recorded as the real path, the tool sends the symlinked spelling.
+    d2 = locate("Edit", {"file_path": link + "/src/m.py", "old_string": old}, real)
+    for loc in (d1, d2):
+        assert (loc.action, loc.path, loc.qualname) == ("gate", "src/m.py", "Outer/method")
+
+
+def test_dot_dot_alias_is_normalized_before_the_wire(tmp_path: Path) -> None:
+    """gate-F2: an in-repo `..` round trip must reach the wire as the indexed spelling."""
+    root = _write(tmp_path)
+    loc = locate("Edit", {"file_path": root + "/src/../src/m.py",
+                          "old_string": "        return inner()"}, root)
+    assert (loc.action, loc.path, loc.qualname) == ("gate", "src/m.py", "Outer/method")
+
+
+def test_dot_dot_escape_out_of_the_repo_passes(tmp_path: Path) -> None:
+    """gate-F3 (§7.2): a file genuinely outside repo_root PASSes — never a hard local deny."""
+    root = _write(tmp_path)
+    outside = tmp_path / "outside.py"
+    outside.write_text("def gone():\n    return 1\n", encoding="utf-8")
+    escaped = locate("Edit", {"file_path": root + "/../outside.py",
+                              "old_string": "def gone():"}, root)
+    assert escaped.action == "pass"
+    # Same file, spelled absolutely: identical verdict, no server round trip either way.
+    assert locate("Edit", {"file_path": str(outside), "old_string": "def gone():"},
+                  root).action == "pass"
 
 
 def test_unknown_tools_and_out_of_repo_paths_pass(tmp_path: Path) -> None:

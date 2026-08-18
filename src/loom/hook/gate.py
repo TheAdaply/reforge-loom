@@ -18,19 +18,59 @@ from datetime import UTC, datetime
 from loom.hook.locator import locate
 
 _CFG_KEYS = ("server_url", "agent", "repo", "repo_root")
+# Only these spellings arm the escape hatch: bare truthiness turns `LOOM_BYPASS=0`/`=false`
+# — what a human writes to mean "off" — into a silently dead gate.
+_BYPASS_ON = frozenset({"1", "true"})
 _UNREACHABLE = "loom: coordination server unreachable — edit allowed, claims NOT checked"
 _NOT_INITIALIZED = "loom: not initialized — run loom init"
 # `decide()` is pure (§9.1), so the audit record it computes is parked here for main()'s IO.
 _REC: dict = {}
 
 
-def load_config() -> dict | None:
-    """`~/.loom/config.toml` via tomllib; missing or incomplete -> None (fail-open).
-
-    Per-process overrides for the several-agents-one-OS-user case: `LOOM_CONFIG`
-    replaces the config path, `LOOM_AGENT` replaces the agent identity."""
+def _walk_up_config(start_dir: str) -> str | None:
+    """Nearest `<ancestor>/.claude/loom.toml` at or above `start_dir` (the edited tree)."""
     try:
-        path = os.environ.get("LOOM_CONFIG") or os.path.expanduser("~/.loom/config.toml")
+        cur = os.path.abspath(start_dir)
+    except Exception:
+        return None
+    while True:
+        candidate = os.path.join(cur, ".claude", "loom.toml")
+        if os.path.isfile(candidate):
+            return candidate
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+
+
+def config_start_dir(payload: dict) -> str | None:
+    """Where per-repo config discovery starts: the edited file's directory, else payload cwd."""
+    try:
+        tool_input = payload.get("tool_input") or payload.get("toolInput") or {}
+        for key in ("file_path", "filePath", "notebook_path", "relative_path"):
+            value = tool_input.get(key) if isinstance(tool_input, dict) else None
+            if isinstance(value, str) and value and os.path.isabs(value):
+                return os.path.dirname(value)
+        cwd = payload.get("cwd")
+        return cwd if isinstance(cwd, str) and cwd else None
+    except Exception:
+        return None
+
+
+def load_config(start_dir: str | None = None) -> dict | None:
+    """Discovery order: `LOOM_CONFIG` > `<repo_root>/.claude/loom.toml` walked up from
+    `start_dir` > `~/.loom/config.toml`; missing or incomplete -> None (fail-open).
+
+    The per-repo file exists because the one global slot is a single point of clobber: a
+    second `loom init` for another repo used to leave the first repo's gate checking the
+    second repo's server (which answers `allow` for a salt it does not serve). Per-process
+    overrides for the several-agents-one-OS-user case: `LOOM_CONFIG` replaces the config
+    path outright, `LOOM_AGENT` replaces the agent identity."""
+    try:
+        path = os.environ.get("LOOM_CONFIG")
+        if not path and isinstance(start_dir, str) and start_dir:
+            path = _walk_up_config(start_dir)
+        path = path or os.path.expanduser("~/.loom/config.toml")
         with open(path, "rb") as fh:
             cfg = tomllib.load(fh)
     except Exception:
@@ -103,8 +143,8 @@ def main() -> None:
         payload = json.loads(raw) if raw.strip() else {}
         if not isinstance(payload, dict):
             raise ValueError("payload is not a JSON object")
-        cfg = load_config()
-        if os.environ.get("LOOM_BYPASS"):
+        cfg = load_config(config_start_dir(payload))
+        if os.environ.get("LOOM_BYPASS", "").strip().lower() in _BYPASS_ON:
             # Human-only escape hatch, documented solely in `loom init` output (§7.4).
             _REC.update(decision="bypass", case="bypass")
             verdict = (0, "", "loom: gate bypassed by LOOM_BYPASS; recorded in ~/.loom/gate-audit.jsonl")

@@ -26,6 +26,9 @@ CLAIM_TTL_S = 1800
 TTL_FLOOR_S = 60
 SWEEP_GRACE_S = 3600
 MAX_DENY_CHARS = 9000
+CLOSURE_MAX_NODES = 5000     # bound on one CONTAINS walk (§4 hierarchy); a pathological
+                             # graph must never stall the gate's fast read path.
+_SQL_VARS = 400              # IN(...) chunk size, well under SQLite's variable limit.
 
 # §7.4 verbatim. UNSCOPED is hook-local (locator.py, M3) and never lives here.
 FOREIGN_CLAIM_TMPL = """loom: BLOCKED — {ref} is claimed by "{owner_agent}" under plan {owner_plan_id} "{owner_title}", expires {owner_expires_iso} (in {minutes}m).
@@ -181,17 +184,63 @@ def expand_write_targets(conn: sqlite3.Connection, repo: str,
     return out
 
 
+def _chunks(items: list[str]) -> list[list[str]]:
+    return [items[i:i + _SQL_VARS] for i in range(0, len(items), _SQL_VARS)] or [[]]
+
+
+def contains_closure(conn: sqlite3.Connection, repo: str, node_ids: set[str],
+                     *, up: bool = True, down: bool = True) -> set[str]:
+    """§4 containment relatives of `node_ids`, transitively, over `edges.kind='CONTAINS'`.
+
+    Direction is frozen in the DDL: src = container (File|Class), dst = contained. `up`
+    walks to containers (a symbol's Class then its File), `down` to the contained set (a
+    File's classes/functions, a Class's methods). Includes the input ids. Pure reads, so
+    it is safe both inside the caller's BEGIN IMMEDIATE and on the unwrapped gate path.
+    """
+    seen = set(node_ids)
+    frontier = sorted(seen)
+    while frontier and len(seen) < CLOSURE_MAX_NODES:
+        found: set[str] = set()
+        for chunk in _chunks(frontier):
+            if not chunk:
+                break
+            marks = ",".join("?" * len(chunk))
+            if up:
+                found.update(r["id"] for r in conn.execute(
+                    "SELECT e.src AS id FROM edges e JOIN nodes n ON n.id=e.src "
+                    f"WHERE e.kind='CONTAINS' AND e.dst IN ({marks}) AND n.repo=?",
+                    (*chunk, repo)))
+            if down:
+                found.update(r["id"] for r in conn.execute(
+                    "SELECT e.dst AS id FROM edges e JOIN nodes n ON n.id=e.dst "
+                    f"WHERE e.kind='CONTAINS' AND e.src IN ({marks}) AND n.repo=?",
+                    (*chunk, repo)))
+        frontier = sorted(found - seen)
+        seen.update(frontier)
+    return seen
+
+
 def find_conflicts(conn: sqlite3.Connection, repo: str, write_set: set[str], read_set: set[str],
                    own_plan_ids: set[str], now: float) -> list[dict[str, Any]]:
-    """Active foreign claims intersecting my sets. write-write blocks; mixed modes warn."""
-    wanted = {n: "write" for n in write_set}
-    wanted.update({n: "read" for n in read_set if n not in write_set})
+    """Active foreign claims intersecting my sets. write-write blocks; mixed modes warn.
+
+    Each wanted node is judged over its CONTAINS closure (§4): declaring a whole file
+    intersects live claims on the symbols inside it, and declaring a symbol intersects a
+    live claim on its file/class. The closure widens the QUESTION only — the claim rows
+    written by declare/rescope are still exactly the resolved targets plus §5.3's CALLS hop.
+    """
+    w = contains_closure(conn, repo, write_set) if write_set else set()
+    r = contains_closure(conn, repo, read_set) if read_set else set()
+    wanted = {n: "write" for n in w}
+    wanted.update({n: "read" for n in r if n not in w})
     if not wanted:
         return []
-    marks = ",".join("?" * len(wanted))
-    rows = conn.execute(
-        _OWNER_COLS + _ACTIVE_FROM + f"WHERE c.node_id IN ({marks}) AND " + _ACTIVE_WHERE
-        + "AND p.repo=?", (*wanted, now, repo)).fetchall()
+    rows: list[sqlite3.Row] = []
+    for chunk in _chunks(sorted(wanted)):
+        marks = ",".join("?" * len(chunk))
+        rows += conn.execute(
+            _OWNER_COLS + _ACTIVE_FROM + f"WHERE c.node_id IN ({marks}) AND " + _ACTIVE_WHERE
+            + "AND p.repo=?", (*chunk, now, repo)).fetchall()
     out = []
     for r in rows:
         kind = f"{wanted[r['node_id']]}-{r['mode']}"
@@ -379,11 +428,18 @@ def _decide(conn: sqlite3.Connection, agent: str, decision: str, case: str, mess
 
 def check_node(conn: sqlite3.Connection, *, repo: str, agent: str, node_id: str,
                now: float) -> dict[str, Any]:
-    """§6 steps 3-6 on an already-resolved node. Plain reads; never wrap in a transaction."""
+    """§6 steps 3-6 on an already-resolved node. Plain reads; never wrap in a transaction.
+
+    Judged over the node AND its CONTAINS ancestors (§4): a write claim on the containing
+    File/Class covers every symbol inside it — so its owner is allowed on their own file,
+    and a foreign container claim blocks the symbol edit instead of silently clearing it.
+    """
+    scope = sorted(contains_closure(conn, repo, {node_id}, down=False))
+    marks = ",".join("?" * len(scope))
     mine = conn.execute(
-        "SELECT p.id AS pid " + _ACTIVE_FROM + "WHERE c.node_id=? AND c.mode='write' AND "
-        + _ACTIVE_WHERE + "AND p.agent=? AND p.repo=? ORDER BY p.updated DESC LIMIT 1",
-        (node_id, now, agent, repo)).fetchone()
+        "SELECT p.id AS pid " + _ACTIVE_FROM + f"WHERE c.node_id IN ({marks}) AND "
+        "c.mode='write' AND " + _ACTIVE_WHERE + "AND p.agent=? AND p.repo=? "
+        "ORDER BY p.updated DESC LIMIT 1", (*scope, now, agent, repo)).fetchone()
     if mine:
         # Implicit renew of the matched plan; the judge lives in the WHERE, so no tx.
         conn.execute("UPDATE plans SET ttl_expires=MAX(ttl_expires, ?), updated=? "
@@ -391,8 +447,9 @@ def check_node(conn: sqlite3.Connection, *, repo: str, agent: str, node_id: str,
                      (now + CLAIM_TTL_S, iso(now), mine["pid"], now))
         return _decide(conn, agent, "allow", "in_plan", "", node_id, mine["pid"])
     foreign = conn.execute(
-        _OWNER_COLS + _ACTIVE_FROM + "WHERE c.node_id=? AND c.mode='write' AND " + _ACTIVE_WHERE
-        + "AND p.agent<>? ORDER BY p.ttl_expires DESC LIMIT 1", (node_id, now, agent)).fetchone()
+        _OWNER_COLS + _ACTIVE_FROM + f"WHERE c.node_id IN ({marks}) AND c.mode='write' AND "
+        + _ACTIVE_WHERE + "AND p.agent<>? ORDER BY p.ttl_expires DESC LIMIT 1",
+        (*scope, now, agent)).fetchone()
     if foreign:
         owner = _conflict(foreign, "write-write")
         return _decide(conn, agent, "deny", "foreign_claim", compose_foreign_claim(owner),

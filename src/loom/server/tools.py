@@ -13,6 +13,7 @@ No SQL lives in this module (§1: storage SQL is confined to db.py / claims.py).
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Callable
 from typing import Any
@@ -25,6 +26,30 @@ from loom.server.db import immediate, now_s
 from loom.server.ids import split_ref
 
 _WRONG_REPO: dict[str, Any] = {"ok": False, "reason": "wrong_repo"}
+
+# A trailing file suffix (or an explicit `path::qual` ref) is what makes a `check` argument
+# a PATH — the only form §6's path ladder may judge, because a brand-new file legitimately
+# resolves to nothing and must still answer `new_path`.
+_SUFFIX = re.compile(r"\.[A-Za-z0-9_]{1,8}$")
+
+
+def _path_like(node: str) -> bool:
+    return "::" in node or bool(_SUFFIX.search(split_ref(node)[0]))
+
+
+def _needs_resolution(node: str, candidates: list[str]) -> dict[str, Any]:
+    """§5.4 deny shape (+ additive `candidates`) for a `check` argument §5.2 cannot pin.
+
+    A bare qualname that resolves to nothing — or to several nodes — must NEVER reach the
+    path ladder, whose `new_path` allow would clear the caller over a live foreign claim.
+    """
+    shown = candidates[:5]
+    which = f" Candidates: {', '.join(shown)}." if shown else ""
+    return {"allow": False, "case": "needs_resolution", "node_id": None, "owner": None,
+            "message": f'loom: "{node}" does not name exactly one node in this repo. Call '
+                       f'resolve_nodes(queries=["{node}"]), then re-check the node_id it '
+                       f"returns.{which}",
+            "candidates": shown}
 
 
 def register(mcp: MCPServer, state: dict[str, Any]) -> None:
@@ -81,9 +106,18 @@ def register(mcp: MCPServer, state: dict[str, Any]) -> None:
         if node.startswith("n-") and claims.node_exists(conn, served, node):
             d = claims.check_node(conn, repo=served, agent=agent, node_id=node, now=now)
         else:
-            path, qual = split_ref(node)
-            d = claims.gate_decision(conn, repo=served, agent=agent, path=path,
-                                     qualname=qual or None, now=now)
+            rows = claims.resolve_query(conn, served, node)   # §5.2 ladder first (claimsx-F2)
+            if len(rows) == 1:
+                d = claims.check_node(conn, repo=served, agent=agent, node_id=rows[0]["id"],
+                                      now=now)
+            elif rows or not _path_like(node):
+                return _needs_resolution(
+                    node, [claims.node_ref(r["path"], r["qualname"]) for r in rows]
+                    or claims.suggestions(conn, served, node))
+            else:
+                path, qual = split_ref(node)
+                d = claims.gate_decision(conn, repo=served, agent=agent, path=path,
+                                         qualname=qual or None, now=now)
         if d["decision"] == "allow":
             return {"allow": True, "case": d["case"], "plan_id": d["plan_id"]}
         return {"allow": False, "case": d["case"], "message": d["message"], "owner": d["owner"],

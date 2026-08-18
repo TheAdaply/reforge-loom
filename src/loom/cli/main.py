@@ -101,11 +101,14 @@ def cmd_index(args: argparse.Namespace) -> None:
     from loom.indexer.walk import index_repo
 
     repo_root = os.path.abspath(args.repo_root)
+    # Mirror `serve`: a team that pinned a stable salt with `serve --repo NAME` must be able
+    # to re-index under it, or the served graph goes permanently stale (§11.19).
+    repo = args.repo or _repo_of(repo_root)
     init_db(_db_of(args, repo_root))
     conn = connect(_db_of(args, repo_root))
-    stats = index_repo(conn, _repo_of(repo_root), repo_root, changed_only=args.changed)
+    stats = index_repo(conn, repo, repo_root, changed_only=args.changed)
     conn.close()
-    print(json.dumps(stats, default=str))
+    print(json.dumps({"repo": repo, **stats}, default=str))
 
 
 def _health(server: str) -> str:
@@ -185,6 +188,14 @@ def _merge_mcp_json(repo_root: str, server: str) -> bool:
     return True
 
 
+def _write_config(path: str, server: str, agent: str, repo: str, repo_root: str) -> None:
+    """Write the 4-key §7.5 config TOML, creating its directory."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(f'server_url = "{server}"\nagent = "{agent}"\nrepo = "{repo}"\n'
+                 f'repo_root = "{repo_root}"\n')
+
+
 def cmd_init(args: argparse.Namespace) -> None:
     _no_empty(args, "server", "agent")
     repo_root = os.path.abspath(args.repo_root) if args.repo_root else os.getcwd()
@@ -194,10 +205,13 @@ def cmd_init(args: argparse.Namespace) -> None:
     repo = _health(args.server)
     agent = args.agent or os.environ.get("USER") or "agent"
     home = os.path.expanduser("~/.loom")
-    os.makedirs(home, exist_ok=True)
-    with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as fh:
-        fh.write(f'server_url = "{args.server}"\nagent = "{agent}"\nrepo = "{repo}"\n'
-                 f'repo_root = "{repo_root}"\n')
+    # PER-REPO config alongside the settings.json this verb already writes: the ONE global
+    # slot is a single point of clobber — a second `loom init` for another repo silently
+    # pointed the first repo's gate at the second repo's server. The global copy stays for
+    # backward compat; `gate.load_config` prefers the per-repo file it walks up to.
+    local_cfg = os.path.join(repo_root, ".claude", "loom.toml")
+    _write_config(local_cfg, args.server, agent, repo, repo_root)
+    _write_config(os.path.join(home, "config.toml"), args.server, agent, repo, repo_root)
     added = _merge_settings(repo_root, gate)
     mcp_added = _merge_mcp_json(repo_root, args.server)
     appended = _append_snippet(repo_root)
@@ -210,7 +224,8 @@ def cmd_init(args: argparse.Namespace) -> None:
     if proc.returncode != 2:
         _die(f"gate verification failed: {gate} exited {proc.returncode}, expected 2")
     print(f"loom: initialized for repo '{repo}' as agent '{agent}'\n"
-          f"  config    {os.path.join(home, 'config.toml')}\n"
+          f"  config    {local_cfg} (per-repo; wins for edits under {repo_root})\n"
+          f"  fallback  {os.path.join(home, 'config.toml')}\n"
           f"  hooks     {os.path.join(repo_root, '.claude', 'settings.json')} "
           f"({added} group(s) added, gate verified)\n"
           f"  mcp       {os.path.join(repo_root, '.mcp.json')} "
@@ -299,7 +314,7 @@ VERBS = {
              [("--server", {"required": True}), ("--agent", {}),
               ("--repo-root", {"help": "defaults to the current directory"})]),
     "index": (cmd_index, "index a repo into the loom graph",
-              [("--repo-root", {"required": True}), ("--db", {}),
+              [("--repo-root", {"required": True}), ("--repo", {"default": ""}), ("--db", {}),
                ("--changed", {"action": "store_true"})]),
     "ls": (cmd_ls, "list active claims", [("--db", {}), ("--json", {"action": "store_true"})]),
     "show": (cmd_show, "show a plan (lm-...) or a node (n-...)", [("id", {}), ("--db", {})]),

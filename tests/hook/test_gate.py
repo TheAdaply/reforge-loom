@@ -207,6 +207,31 @@ def test_loom_bypass_is_human_only_and_audited(
     assert record["decision"] == "bypass"
 
 
+@pytest.mark.parametrize("value", ["0", "false", "FALSE", "no", "off", " ", ""])
+def test_loom_bypass_off_spellings_do_not_disable_the_gate(
+    stub, repo_root, configure, payload, run_gate, value
+) -> None:
+    """gate-#6: `LOOM_BYPASS=0`/`=false`/`=no` meant OFF, yet bare truthiness killed the gate."""
+    configure(stub.url, repo_root)
+    stub.response = DENY_FOREIGN
+    r = run_gate(payload("foreign_claim_deny"), {"LOOM_BYPASS": value})
+    assert stub.requests, f"LOOM_BYPASS={value!r} skipped the server call"
+    assert r.returncode == 2
+    assert FOREIGN_MSG in r.stderr
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", " True "])
+def test_loom_bypass_on_spellings_still_bypass(
+    stub, repo_root, home, configure, payload, run_gate, value
+) -> None:
+    configure(stub.url, repo_root)
+    stub.response = DENY_FOREIGN
+    r = run_gate(payload("foreign_claim_deny"), {"LOOM_BYPASS": value})
+    assert (r.returncode, r.stdout, stub.requests) == (0, "", [])
+    record = json.loads(Path(home, ".loom", "gate-audit.jsonl").read_text(encoding="utf-8"))
+    assert record["decision"] == "bypass"
+
+
 def test_fail_open_when_server_is_down(stub, repo_root, configure, payload, run_gate) -> None:
     configure("http://127.0.0.1:9", repo_root)  # discard port: connection refused
     r = run_gate(payload("server_down_failopen"))
@@ -286,3 +311,47 @@ def test_loom_agent_and_config_env_overrides(tmp_path, monkeypatch):
     assert loaded["agent"] == "override-agent"
     monkeypatch.delenv("LOOM_AGENT")
     assert load_config()["agent"] == "filed"
+
+
+def test_load_config_prefers_the_per_repo_file_over_the_global_one(tmp_path, monkeypatch):
+    """xm-F1: LOOM_CONFIG > <repo_root>/.claude/loom.toml (walked up) > ~/.loom/config.toml."""
+    import os
+
+    from loom.hook.gate import config_start_dir, load_config
+
+    def write(path, server, repo, root):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(
+            f'server_url = "{server}"\nagent = "bob"\nrepo = "{repo}"\nrepo_root = "{root}"\n',
+            encoding="utf-8")
+
+    home = tmp_path / "home"
+    repo = tmp_path / "alpha"
+    (repo / "src").mkdir(parents=True)
+    write(home / ".loom" / "config.toml", "http://global", "beta-salt", str(tmp_path / "beta"))
+    write(repo / ".claude" / "loom.toml", "http://alpha", "alpha-salt", str(repo))
+    write(tmp_path / "explicit.toml", "http://explicit", "env-salt", str(repo))
+    monkeypatch.setenv("HOME", str(home))
+    for stray in ("LOOM_CONFIG", "LOOM_AGENT"):
+        monkeypatch.delenv(stray, raising=False)
+
+    # no start dir -> the global slot (backward compat, and what garbage payloads get)
+    assert load_config()["repo"] == "beta-salt"
+    # walk up from the edited file's directory -> the repo that owns it
+    assert load_config(str(repo / "src"))["repo"] == "alpha-salt"
+    assert load_config(str(repo / "src"))["server_url"] == "http://alpha"
+    # a directory outside any initialized repo still falls back
+    assert load_config(str(tmp_path / "elsewhere"))["repo"] == "beta-salt"
+    # LOOM_CONFIG still wins outright
+    monkeypatch.setenv("LOOM_CONFIG", str(tmp_path / "explicit.toml"))
+    assert load_config(str(repo / "src"))["repo"] == "env-salt"
+    monkeypatch.delenv("LOOM_CONFIG")
+
+    # the start dir comes from the edited file, falling back to the payload cwd
+    assert config_start_dir(
+        {"cwd": str(repo), "tool_input": {"file_path": str(repo / "src" / "mod.py")}}
+    ) == str(repo / "src")
+    assert config_start_dir({"cwd": str(repo), "tool_input": {"content": "x"}}) == str(repo)
+    assert config_start_dir({}) is None
+    assert config_start_dir({"tool_input": {"file_path": "rel/path.py"}}) is None
+    assert os.path.isdir(str(repo))

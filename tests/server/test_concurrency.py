@@ -125,7 +125,9 @@ def test_a_burst_of_concurrent_declares_never_raises_operational_error(live) -> 
     """busy_timeout=5000 proof: losers of a write race queue, they do not error."""
     port, _ = live
     url = f"http://127.0.0.1:{port}/mcp"
-    targets = [[AUTH], [USER], [LONELY], ["svc.py"], ["util.py"], ["models.py"]]
+    # Three disjoint CONTAINS subtrees, two racers each: svc.py (AUTH is two levels inside
+    # it), models.py (User inside it), iso.py (lonely inside it).
+    targets = [[AUTH], ["svc.py"], [USER], ["models.py"], [LONELY], ["iso.py"]]
 
     async def burst() -> list[dict]:
         clients = [Client(url) for _ in targets]
@@ -140,9 +142,11 @@ def test_a_burst_of_concurrent_declares_never_raises_operational_error(live) -> 
     for r in results:
         assert "OperationalError" not in json.dumps(r)
         assert r.get("ok") is True or r.get("reason") == "conflict"
-    # AUTH expands over CALLS onto svc.py::login and util.py::hash_pw, but the file nodes
-    # svc.py / util.py are distinct nodes, so all six declares are compatible.
-    assert sum(1 for r in results if r.get("ok")) == len(targets)
+    # Claims are hierarchical (P0-2): a file-level target and a symbol inside it are the
+    # same ground, so BEGIN IMMEDIATE serializes each pair to exactly one winner —
+    # deterministically 3 winners and 3 conflicts, whatever order the six land in.
+    assert sum(1 for r in results if r.get("ok")) == 3
+    assert sum(1 for r in results if r.get("reason") == "conflict") == 3
 
 
 def test_the_plain_http_gate_and_health_routes_speak_the_frozen_wire(live) -> None:

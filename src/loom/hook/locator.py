@@ -52,7 +52,11 @@ def _rel(raw, repo_root: str) -> str | None:
         return None
     path, root = norm_path(raw), norm_path(repo_root).rstrip("/")
     if not path.startswith("/"):
-        return path
+        return path  # §7.1: a relative tool path is passed through, NEVER cwd-joined
+    # Canonicalize both sides so one file has one identity: `realpath` resolves symlinked
+    # repo roots (a symlink-spelled repo must gate identically) and collapses `..`, so the
+    # wire path is always the indexed spelling and a file truly outside the repo PASSes.
+    path, root = os.path.realpath(path), os.path.realpath(root).rstrip("/")
     return path[len(root) + 1 :] if path.startswith(root + "/") else None
 
 

@@ -254,3 +254,118 @@ def test_init_registers_mcp_server(tmp_path, monkeypatch):
     data = _json.loads((repo_root / ".mcp.json").read_text())
     assert data["mcpServers"]["loom"] == {"type": "http", "url": "http://127.0.0.1:9999/mcp"}
     assert data["mcpServers"]["other"]["url"] == "http://x/mcp"  # merged, not clobbered
+
+
+# --------------------------------------------------------------------------- P0-3 / xm-F1
+# A second `loom init` for ANOTHER repo used to clobber the ONE global ~/.loom/config.toml,
+# so every later edit in the FIRST repo was checked against the SECOND repo's server — which
+# answers `allow` for a salt it does not serve. `loom init` now also writes a per-repo
+# <repo_root>/.claude/loom.toml and gate.load_config walks up to it.
+
+
+def _salt_stub(salt: str):
+    """A throwaway loom-server stand-in: GET /health names `salt`, POST /gate records+allows."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def _send(self, body: bytes) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:  # noqa: N802
+            self._send(json.dumps({"ok": True, "repo": self.server.salt}).encode())
+
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length") or 0)
+            self.server.requests.append(json.loads(self.rfile.read(length) or b"{}"))
+            self._send(json.dumps({"decision": "allow", "case": "in_plan", "message": "",
+                                   "node_id": None, "plan_id": None}).encode())
+
+        def log_message(self, *args: object) -> None:
+            return
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    srv.daemon_threads = True
+    srv.salt, srv.requests = salt, []
+    srv.url = f"http://127.0.0.1:{srv.server_address[1]}"
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def test_init_for_a_second_repo_does_not_disarm_the_first(
+    tmp_path, home, fake_gate, monkeypatch
+) -> None:
+    """xm-F1: init repo A, then repo B; an edit in A must still reach A's server."""
+    import subprocess
+
+    monkeypatch.setenv("HOME", home)
+    roots = []
+    for name in ("alpha", "beta"):
+        root = tmp_path / name
+        (root / "src").mkdir(parents=True)
+        (root / "src" / "mod.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+        roots.append(root)
+    first, second = _salt_stub("alpha-salt"), _salt_stub("beta-salt")
+    try:
+        run_cli(monkeypatch, "init", "--server", first.url, "--agent", "bob",
+                "--repo-root", str(roots[0]))
+        run_cli(monkeypatch, "init", "--server", second.url, "--agent", "bob",
+                "--repo-root", str(roots[1]))
+
+        # 1. each repo carries its OWN config next to the settings.json init already wrote
+        cfg_a = Path(roots[0], ".claude", "loom.toml").read_text(encoding="utf-8")
+        cfg_b = Path(roots[1], ".claude", "loom.toml").read_text(encoding="utf-8")
+        assert f'server_url = "{first.url}"' in cfg_a and 'repo = "alpha-salt"' in cfg_a
+        assert f'server_url = "{second.url}"' in cfg_b and 'repo = "beta-salt"' in cfg_b
+        # 2. the global slot still exists (backward compat) and holds the LAST init
+        global_cfg = Path(home, ".loom", "config.toml").read_text(encoding="utf-8")
+        assert f'server_url = "{second.url}"' in global_cfg
+
+        # 3. the real hook, editing in repo A AFTER repo B was initialized
+        payload = json.dumps({
+            "session_id": "s-1", "cwd": str(roots[0]), "hook_event_name": "PreToolUse",
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(roots[0] / "src" / "mod.py"), "content": "x"},
+        })
+        env = {**os.environ, "HOME": home}
+        for stray in ("LOOM_CONFIG", "LOOM_AGENT", "LOOM_BYPASS", "LOOM_AGENT_MODE"):
+            env.pop(stray, None)
+        proc = subprocess.run([sys.executable, "-m", "loom.hook.gate"], input=payload,
+                              capture_output=True, text=True, timeout=30, env=env)
+        assert proc.returncode == 0
+        assert second.requests == []  # the OTHER repo's server is never consulted
+        assert [(r["repo"], r["path"]) for r in first.requests] == [("alpha-salt", "src/mod.py")]
+    finally:
+        for srv in (first, second):
+            srv.shutdown()
+            srv.server_close()
+
+
+# --------------------------------------------------------------------------- P1-2 / xm-F3
+
+
+def test_index_honours_an_explicit_repo_salt(tmp_path, monkeypatch, capsys) -> None:
+    """xm-F3: `serve --repo NAME` pinned a salt; re-index must be able to write under it."""
+    repo_root = tmp_path / "clone-with-other-basename"
+    (repo_root / "src").mkdir(parents=True)
+    (repo_root / "src" / "mod.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    db = str(tmp_path / "loom.sqlite3")
+
+    run_cli(monkeypatch, "index", "--repo-root", str(repo_root), "--db", db,
+            "--repo", "teamrepo")
+    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["repo"] == "teamrepo"
+
+    con = sqlite3.connect(db)
+    assert [r[0] for r in con.execute("SELECT DISTINCT repo FROM nodes")] == ["teamrepo"]
+
+    # default is still the basename, and it is printed
+    run_cli(monkeypatch, "index", "--repo-root", str(repo_root), "--db", db)
+    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["repo"] == \
+        "clone-with-other-basename"
+    assert set(r[0] for r in con.execute("SELECT DISTINCT repo FROM nodes")) == {
+        "teamrepo", "clone-with-other-basename"}
+    con.close()

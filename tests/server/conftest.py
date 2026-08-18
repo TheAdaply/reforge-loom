@@ -7,6 +7,12 @@ topology is deliberate:
     svc.py::login ──CALLS──▶ svc.py::AuthService/authenticate ──CALLS──▶ util.py::hash_pw
     svc.py       ──IMPORTS─▶ util.py                (radius 0: never expanded)
     models.py::User, iso.py::lonely                 (disjoint — safe re-declare ground)
+
+CONTAINS mirrors what M1 mints (`walk.py::_index_tree`, tests/indexer EXPECTED_CONTAINS):
+src = container, dst = contained, one edge per nesting level, so the chain is
+`svc.py -> svc.py::AuthService -> svc.py::AuthService/authenticate`. Both endpoints are
+FULL refs — a bare `"AuthService"` would mint the id of a nonexistent FILE node named
+`AuthService` and leave the edge dangling.
 """
 
 from __future__ import annotations
@@ -39,9 +45,12 @@ EDGES = [
     ("svc.py::login", "svc.py::AuthService/authenticate", "CALLS"),
     ("svc.py::AuthService/authenticate", "util.py::hash_pw", "CALLS"),
     ("svc.py", "util.py", "IMPORTS"),
-    ("svc.py", "AuthService", "CONTAINS"),
-    ("svc.py", "login", "CONTAINS"),
-    ("util.py", "hash_pw", "CONTAINS"),
+    ("svc.py", "svc.py::AuthService", "CONTAINS"),
+    ("svc.py::AuthService", "svc.py::AuthService/authenticate", "CONTAINS"),
+    ("svc.py", "svc.py::login", "CONTAINS"),
+    ("util.py", "util.py::hash_pw", "CONTAINS"),
+    ("models.py", "models.py::User", "CONTAINS"),
+    ("iso.py", "iso.py::lonely", "CONTAINS"),
 ]
 
 

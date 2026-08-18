@@ -92,6 +92,23 @@ def test_decision_order_in_plan_then_foreign_then_out_of_scope_then_no_plan(
     assert '"cy"' in none["message"]
 
 
+def test_a_file_level_claim_is_hierarchical_end_to_end(gconn: sqlite3.Connection) -> None:
+    """P0-2 end to end: declare the whole file the way app.INSTRUCTIONS step 2 tells agents
+    to ("whole files are `relative/path.ext`"), then drive the §6 decision order over it."""
+    a = declare(gconn, "aria", ["svc.py"], title="rewrite svc.py")
+
+    inside = gate(gconn, "aria", "svc.py", "AuthService/authenticate")   # two levels deep
+    assert (inside["decision"], inside["case"], inside["plan_id"]) == \
+        ("allow", "in_plan", a["plan_id"])
+
+    foreign = gate(gconn, "bo", "svc.py", "login")
+    assert (foreign["decision"], foreign["case"]) == ("deny", "foreign_claim")
+    assert foreign["plan_id"] == a["plan_id"] and foreign["node_id"] == nid(LOGIN)
+    assert 'is claimed by "aria"' in foreign["message"]
+
+    assert declare(gconn, "bo", [AUTH])["reason"] == "conflict"   # and bo cannot claim in
+
+
 def test_a_foreign_read_claim_never_blocks_an_in_plan_write(gconn: sqlite3.Connection) -> None:
     declare(gconn, "aria", [LOGIN], assumes=[USER])       # aria READS User
     declare(gconn, "bo", [USER], title="bo owns user")    # bo WRITES User (warned at declare)
