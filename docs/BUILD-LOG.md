@@ -36,3 +36,12 @@
   Live-verified: auth.py::login -> src/conduit/api/routes/auth.py::login; declare via suffix refs
   granted (lm-udebf0). +3 deep-path regression tests incl. negative non-boundary case. 301 tests.
   Focus-mode before/after screenshots committed (docs/dashboard-conduit-{before,focus}.png).
+- 2026-08-18 TWO-USER SIMULATION (unscripted, current build): bare origin + two clones, per-clone
+  identities via .claude/loom.toml discovery (no env vars), two concurrent `claude -p` sessions.
+  Event trace: alice declared/edited/pushed f665a1a/released; bob's colliding declare DENIED with
+  her spec embedded; bob read it, designed his cache to sit BEHIND her guard, waited; his eager
+  post-release edit was ALSO denied (no_plan) until he re-declared; then declared/edited/pushed
+  fd7d034/released. Origin: two stacked commits, ZERO merge conflicts, composed behavior verified
+  by bob's own smoke test. Product finding fixed same-hour (ace3cc0): init now gitignores the
+  per-user loom.toml — alice's `git add -A` had committed her identity file and bob had to stash
+  around it. 302 tests. Screenshot: docs/dashboard-two-users.png.
