@@ -279,6 +279,23 @@ def _write_config(path: str, server: str, agent: str, repo: str, repo_root: str,
                  f'repo_root = "{repo_root}"\n' + (f'token = "{token}"\n' if token else ""))
 
 
+def _ignore_identity(repo_root: str) -> bool:
+    """Idempotently gitignore the PER-USER identity file. Found live in the two-user
+    simulation: one user's `git add -A` committed their `loom.toml` into the shared
+    repo, and pulling it would silently re-identify every teammate as them."""
+    path = os.path.join(repo_root, ".gitignore")
+    line = ".claude/loom.toml"
+    existing = ""
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            existing = fh.read()
+        if line in existing.splitlines():
+            return False
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(("" if not existing or existing.endswith("\n") else "\n") + line + "\n")
+    return True
+
+
 def cmd_init(args: argparse.Namespace) -> None:
     _no_empty(args, "server", "agent", "repo", "token")
     repo_root = os.path.abspath(args.repo_root) if args.repo_root else os.getcwd()
@@ -306,6 +323,7 @@ def cmd_init(args: argparse.Namespace) -> None:
     added = _merge_settings(repo_root, gate)
     mcp_added = _merge_mcp_json(repo_root, args.server, token)
     appended = _append_snippet(repo_root)
+    ignored = _ignore_identity(repo_root)
     # A mistyped command path leaves the gate silently disabled — prove exit 2 (§7.5).
     try:
         proc = subprocess.run([gate], input=json.dumps(VERIFY_PAYLOAD), capture_output=True,

@@ -400,3 +400,25 @@ def test_index_honours_an_explicit_repo_salt(tmp_path, monkeypatch, capsys) -> N
     assert set(r[0] for r in con.execute("SELECT DISTINCT repo FROM nodes")) == {
         "teamrepo", "clone-with-other-basename"}
     con.close()
+
+
+def test_init_gitignores_the_identity_file(tmp_path, monkeypatch):
+    """Two-user simulation finding: a teammate's `git add -A` must never be able to commit
+    their per-user loom.toml into the shared repo (pulling it re-identifies everyone)."""
+    from loom.cli import main as cli_mod
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".gitignore").write_text("__pycache__/\n")
+    monkeypatch.setattr(cli_mod, "_health", lambda server: {"ok": True, "repos": ["testrepo"]})
+    monkeypatch.setattr(cli_mod.shutil, "which", lambda name: "/usr/bin/true-gate")
+    monkeypatch.setattr(cli_mod.subprocess, "run",
+                        lambda *a, **k: type("P", (), {"returncode": 2, "stderr": ""})())
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    run_cli(monkeypatch, "init", "--server", "http://127.0.0.1:9999",
+            "--agent", "t", "--repo-root", str(repo_root))
+    lines = (repo_root / ".gitignore").read_text().splitlines()
+    assert ".claude/loom.toml" in lines and lines[0] == "__pycache__/"  # appended, not clobbered
+    run_cli(monkeypatch, "init", "--server", "http://127.0.0.1:9999",
+            "--agent", "t", "--repo-root", str(repo_root))
+    assert (repo_root / ".gitignore").read_text().splitlines().count(".claude/loom.toml") == 1
