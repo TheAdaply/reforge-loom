@@ -87,6 +87,27 @@ def test_the_repo_switcher_is_wired_but_stays_invisible_on_a_one_repo_server(liv
     assert state["repos"] == ["demo"] and state["repo"] == "demo"  # /state plumbing
 
 
+def test_the_fixture_repo_is_below_the_focus_threshold_and_untruncated(live_server):
+    """ITERATION-2-SPEC §1/§2, the cheap half. Focus mode is pure browser JS, so CI asserts
+    the two things it can: the page SHIPS the frozen thresholds and copy, and the fixture
+    repo's own `/state` puts it on the FULL-VIEW side of every switch — 4 files is under the
+    >12 threshold and nothing is capped, so neither header note can appear. (The conduit-
+    sized visual is the orchestrator's screenshot job, not CI's.)"""
+    base, _db = live_server
+    page = _get(base + "/")[1]
+    assert "const FOCUS_FILE_THRESHOLD = 12;" in page                  # threshold frozen at 12
+    assert "const BEAD_CAP = 14;" in page                              # 14 beads per thread
+    assert "files with active claims surface automatically" in page    # exact scope-note copy
+    assert "graph truncated to first 600 nodes" in page                # exact §2 copy
+    assert 'id="nNodes"' in page                                       # the totals-fed tile
+
+    state = json.loads(_get(base + "/state")[1])
+    files = {n["path"] for n in state["nodes"]}
+    assert len(files) == 4 and len(files) <= 12          # ≤ 12 files → today's full view
+    assert state["truncated"] == {"nodes": False, "edges": False}   # → no truncation note
+    assert state["totals"]["nodes"] == state["counts"]["nodes"]     # tile == honest COUNT(*)
+
+
 def test_state_shape_and_claims(live_server):
     base, db = live_server
     conn = connect(db)

@@ -56,10 +56,16 @@
     letter-spacing: .12em; text-transform: uppercase; color: var(--ink-2);
     border-bottom: 1px solid var(--line-soft);
   }
+  /* Header scope/truncation notes: the heading is uppercased and letter-spaced, which would
+     mangle the frozen copy — so the note opts out of both and reads as plain monospace. */
+  .panel h2 .note {
+    text-transform: none; letter-spacing: 0; font-weight: 400;
+    font-family: var(--mono); color: var(--ink-2);
+  }
   #fabric { padding: .5rem .5rem .75rem; }
   #fabric svg { display: block; width: 100%; height: auto; }
   .rail { display: flex; flex-direction: column; gap: 1.25rem; min-width: 0; }
-  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: .75rem; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: .75rem; }
   .tile {
     background: var(--card); border: 1px solid var(--line); border-radius: 8px;
     padding: .6rem .8rem;
@@ -116,7 +122,7 @@
 <div id="banner">reconnecting to the loom server…</div>
 <main>
   <section class="panel">
-    <h2>the fabric — files as threads, symbols as beads, claims as color</h2>
+    <h2 id="fabricHead">the fabric — files as threads, symbols as beads, claims as color</h2>
     <div id="fabric"><div class="empty">loading the graph…</div></div>
   </section>
   <div class="rail">
@@ -125,6 +131,7 @@
       <div class="tile"><b id="nPlans">0</b><span>active plans</span></div>
       <div class="tile"><b id="nClaims">0</b><span>claims held</span></div>
       <div class="tile denies"><b id="nDenies">0</b><span>denies (recent)</span></div>
+      <div class="tile"><b id="nNodes">0</b><span>nodes</span></div>
     </div>
     <section class="panel">
       <h2>active plans</h2>
@@ -142,6 +149,13 @@
 const AGENT_COLORS = ["#2a78d6", "#eb6834", "#1baf7a"];    // validated all-pairs safe trio
 const MORE = "#8b897f";                                     // 4th+ agents share neutral, chips carry names
 const agentSlot = new Map();                                // first-seen, stable — color follows the entity
+// Focus mode (ITERATION-2-SPEC §1): a 78-file repo drawn in full is an unreadable smear, so
+// past the threshold the fabric shows the threads that carry live work and says so in the header.
+const FOCUS_FILE_THRESHOLD = 12;                            // > this many files → focus view
+const FOCUS_MIN_THREADS = 3, FOCUS_MAX_THREADS = 12;        // padding floor / hard ceiling
+const FOCUS_QUIET_THREADS = 8;                              // big repo, zero claims: top-8 by size
+const BEAD_CAP = 14;                                        // beads per thread before "+k more"
+const FABRIC_TITLE = "the fabric — files as threads, symbols as beads, claims as color";
 const el = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
@@ -160,21 +174,61 @@ function fabricSVG(state) {
   const byFile = new Map();
   for (const n of state.nodes) {
     if (!byFile.has(n.path)) byFile.set(n.path, { file: null, beads: [] });
-    (n.qualname ? byFile.get(n.path).beads : [byFile.get(n.path)]).length; // noop guard
     if (n.qualname) byFile.get(n.path).beads.push(n); else byFile.get(n.path).file = n;
   }
-  const files = [...byFile.keys()].sort();
+  const all = [...byFile.keys()].sort();
   const claimBy = new Map(state.claims.map(c => [c.node_id, c]));
   const planTitle = new Map(state.plans.map(p => [p.id, p.title]));
-  const colW = 118, top = 66, rowH = 34, pad = 24;
-  const maxBeads = Math.max(1, ...[...byFile.values()].map(f => f.beads.length));
-  const W = pad * 2 + files.length * colW, H = top + maxBeads * rowH + pad;
-  const pos = new Map();
-  files.forEach((path, i) => {
-    const x = pad + i * colW + colW / 2;
+
+  // §1 thread selection. Claimed files are never dropped (that is the whole point of the
+  // view); the rest of the budget goes to the biggest remaining threads, so a focused
+  // fabric still reads like the repo and not like a random sample.
+  const focused = all.length > FOCUS_FILE_THRESHOLD;
+  let files = all;
+  if (focused) {
+    const size = p => byFile.get(p).beads.length;
+    const bigFirst = (a, b) => size(b) - size(a) || (a < b ? -1 : 1);   // ties by path: stable
+    const isClaimed = p => {
+      const f = byFile.get(p);
+      return !!(f.file && claimBy.has(f.file.id)) || f.beads.some(b => claimBy.has(b.id));
+    };
+    const keep = new Set([...all].filter(isClaimed).sort(bigFirst).slice(0, FOCUS_MAX_THREADS));
+    const want = keep.size ? Math.max(FOCUS_MIN_THREADS, keep.size) : FOCUS_QUIET_THREADS;
+    for (const p of [...all].sort(bigFirst)) {
+      if (keep.size >= want) break;
+      keep.add(p);
+    }
+    files = all.filter(p => keep.has(p));           // drawn in path order, like the full view
+  }
+
+  // §1 bead cap, per shown thread. Every CLAIMED bead survives — a claim you cannot see is
+  // worse than no fabric at all — and the unclaimed fill the rest of the budget in file order.
+  const view = files.map(path => {
     const f = byFile.get(path);
-    if (f.file) pos.set(f.file.id, { x, y: top - 26 });
-    f.beads.forEach((b, j) => pos.set(b.id, { x, y: top + j * rowH + 14 }));
+    let beads = f.beads, more = 0;
+    if (beads.length > BEAD_CAP) {
+      const at = new Map(beads.map((b, i) => [b.id, i]));
+      const shown = beads.filter(b => claimBy.has(b.id));
+      for (const b of beads) {
+        if (shown.length >= BEAD_CAP) break;
+        if (!claimBy.has(b.id)) shown.push(b);
+      }
+      shown.sort((a, b) => at.get(a.id) - at.get(b.id));
+      more = beads.length - shown.length;
+      beads = shown;
+    }
+    return { path, file: f.file, beads, more };
+  });
+
+  const colW = 118, top = 66, rowH = 34, pad = 24;
+  // A thread carrying a "+k more" foot note needs one extra row of height for it.
+  const maxRows = Math.max(1, ...view.map(v => v.beads.length + (v.more ? 1 : 0)));
+  const W = pad * 2 + view.length * colW, H = top + maxRows * rowH + pad;
+  const pos = new Map();
+  view.forEach((v, i) => {
+    const x = pad + i * colW + colW / 2;
+    if (v.file) pos.set(v.file.id, { x, y: top - 26 });
+    v.beads.forEach((b, j) => pos.set(b.id, { x, y: top + j * rowH + 14 }));
   });
   let edges = "";
   for (const e of state.edges) {
@@ -185,16 +239,18 @@ function fabricSVG(state) {
     edges += `<path d="M${a.x + bow} ${a.y} Q ${mx + bow + (a.x === b.x ? 14 : 0)} ${(a.y + b.y) / 2} ${b.x + bow} ${b.y}" fill="none" stroke="#eceae4" stroke-width="1.25"${dash}/>`;
   }
   let threads = "", beads = "";
-  files.forEach((path, i) => {
+  view.forEach((v, i) => {
     const x = pad + i * colW + colW / 2;
-    const f = byFile.get(path);
-    const yEnd = top + Math.max(1, f.beads.length) * rowH - rowH + 14;
+    const foot = top + v.beads.length * rowH + 14;                       // the "+k more" row
+    const yEnd = v.more ? foot - 12 : top + Math.max(1, v.beads.length) * rowH - rowH + 14;
     threads += `<line x1="${x}" y1="${top - 8}" x2="${x}" y2="${yEnd}" stroke="#eceae5" stroke-width="2"/>`;
-    const short = path.length > 16 ? "…" + path.slice(-15) : path;
-    const fc = f.file && claimBy.get(f.file.id);
+    const short = v.path.length > 16 ? "…" + v.path.slice(-15) : v.path;
+    const fc = v.file && claimBy.get(v.file.id);
     const fileFill = fc ? colorOf(fc.agent) : "#52514e";
-    threads += `<text x="${x}" y="${top - 34}" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10.5" fill="${fileFill}" data-node="${esc(f.file ? f.file.id : "")}">${esc(short)}</text>`;
-    f.beads.forEach(b => {
+    threads += `<text x="${x}" y="${top - 34}" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10.5" fill="${fileFill}" data-node="${esc(v.file ? v.file.id : "")}">${esc(short)}</text>`;
+    if (v.more) threads += `<text x="${x}" y="${foot + 3.5}" text-anchor="middle" ` +
+      `font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#52514e">+${v.more} more</text>`;
+    v.beads.forEach(b => {
       const p = pos.get(b.id), c = claimBy.get(b.id);
       const name = b.qualname.split("/").pop();
       const label = name.length > 12 ? name.slice(0, 11) + "…" : name;
@@ -210,7 +266,17 @@ function fabricSVG(state) {
         `<text x="${p.x + 14}" y="${p.y + 3.5}" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#52514e">${esc(label)}</text></g>`;
     });
   });
-  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="code graph with live claims">${edges}${threads}${beads}</svg>`;
+  // The header note is computed HERE, off the same decision that drew the picture: a second
+  // pass over the state would be one refactor away from saying "12 of 78" over a full view.
+  let note = "";
+  if (focused) note += `<span class="note"> · ${esc(
+    `showing ${view.length} of ${all.length} files — files with active claims surface automatically`)}</span>`;
+  if (state.truncated && (state.truncated.nodes || state.truncated.edges))
+    note += `<span class="note"> · graph truncated to first 600 nodes</span>`;
+  return {
+    svg: `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="code graph with live claims">${edges}${threads}${beads}</svg>`,
+    note,
+  };
 }
 
 function renderRepos(state) {
@@ -234,6 +300,8 @@ function render(state) {
   el("nPlans").textContent = state.counts.plans;
   el("nClaims").textContent = state.counts.claims;
   el("nDenies").textContent = denies;
+  // §2: the honest COUNT(*), not the post-LIMIT `counts.nodes` the fabric was drawn from.
+  el("nNodes").textContent = state.totals ? state.totals.nodes : state.counts.nodes;
   el("chips").innerHTML = state.agents.map(a =>
     `<span class="chip"><span class="swatch" style="background:${colorOf(a)}"></span>${esc(a)}</span>`).join("")
     || '<span class="chip">no agents yet</span>';
@@ -249,7 +317,9 @@ function render(state) {
       <span class="badge ${cls}">${esc(word)}</span>
       <span class="detail">${esc(e.actor)} · ${esc(e.detail)}</span></li>`;
   }).join("") || '<li class="empty">no events yet</li>';
-  el("fabric").innerHTML = fabricSVG(state);
+  const fabric = fabricSVG(state);
+  el("fabric").innerHTML = fabric.svg;
+  el("fabricHead").innerHTML = esc(FABRIC_TITLE) + fabric.note;
 }
 
 const tip = el("tip");
@@ -273,17 +343,30 @@ el("repos").addEventListener("click", ev => {
   poll();                                                   // re-poll now, don't wait 2s
 });
 
+function offline(status, message) {
+  el("liveText").textContent = status;
+  el("live").classList.add("down");
+  el("banner").textContent = message;     // always re-set: a transient 401 must not stick
+  el("banner").style.display = "block";
+}
+
 async function poll() {
   if (document.hidden) return;
   try {
     const r = await fetch(selectedRepo ? "/state?repo=" + encodeURIComponent(selectedRepo) : "/state");
+    // §5a: the shell is served open at `/`, so on a tokened server the page would spin on
+    // "reconnecting" forever. Say the true thing instead — before the json parse, since a
+    // 401 body is an error shape, not a state.
+    if (r.status === 401) {
+      offline("no access",
+              "this server requires a token — the dashboard reads only open servers for now");
+      return;
+    }
     const s = await r.json();
     if (s.ok) render(s);
     else throw new Error(s.error || "not ok");
   } catch {
-    el("liveText").textContent = "reconnecting";
-    el("live").classList.add("down");
-    el("banner").style.display = "block";
+    offline("reconnecting", "reconnecting to the loom server…");
   }
 }
 poll();
