@@ -372,14 +372,17 @@ def _json_file(path: str | None) -> dict:
 
 
 def cmd_doctor(args: argparse.Namespace) -> None:
-    """MULTIREPO-SPEC §4 + ITERATION-2-SPEC D11: nine checks over ONE checkout,
+    """MULTIREPO-SPEC §4 + ITERATION-2-SPEC D11 + U2: ten checks over ONE checkout,
     PASS/FAIL/WARN, exit 0 iff no FAIL.
 
     The sellability tool — "is loom actually wired up here?" answered without reading any
     docs. Every check catches its own failure and degrades to a FAIL row: the table always
-    prints all nine, because the row that explains the breakage is usually not the first
+    prints all ten, because the row that explains the breakage is usually not the first
     one to fail. `loom-gate` runs for real (check 8), so a green table means the whole
     chain — config discovery, hook binary, server, auth, claim decision — just worked.
+
+    Checks 9 and 10 are the two ways a graph can be untrue — absent, and behind — and both
+    are WARN-only: neither can ever fail a CI run over something a single `loom index` fixes.
     """
     from loom.hook import gate as hook_gate     # lazy: keeps `loom serve`'s import graph thin
 
@@ -480,14 +483,16 @@ def cmd_doctor(args: argparse.Namespace) -> None:
             detail = f"could not run {gate_bin} ({type(exc).__name__})"
     row("gate round-trip", ok, detail)
 
-    # 9 index freshness — WARN, not FAIL: an unindexed repo gates nothing, but it is a
-    # one-command fix and never a reason to fail a CI-style check.
+    # 9 index freshness / 10 index staleness — both WARN, never FAIL: an unindexed or a
+    # behind repo gates less than it should, but each is a one-command fix and neither is a
+    # reason to fail a CI-style check. One `/state` fetch answers both rows.
+    state: dict = {}
     ok, warn, detail = False, False, "skipped — server or repo unknown"
     if cfg and repo in served and served:
         try:
-            counts = _get_json(f"{cfg['server_url'].rstrip('/')}/state?repo="
-                               f"{urllib.parse.quote(repo)}", 3, cfg_token).get("counts") or {}
-            nodes = int(counts.get("nodes") or 0)
+            state = _get_json(f"{cfg['server_url'].rstrip('/')}/state?repo="
+                              f"{urllib.parse.quote(repo)}", 3, cfg_token)
+            nodes = int((state.get("counts") or {}).get("nodes") or 0)
             ok, warn = nodes > 0, nodes == 0
             detail = (f"{nodes} node(s) indexed for '{repo}'" if nodes else
                       f"'{repo}' has no indexed nodes — run `loom index --repo {repo} "
@@ -495,6 +500,21 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         except Exception as exc:
             detail = f"/state unreachable ({type(exc).__name__})"
     row("index freshness", ok, detail, warn=warn)
+
+    # 10 index staleness (U2) — the graph exists but the working tree has moved past it.
+    # A server older than U2 sends no `index_age` at all, which reads as "cannot tell" and
+    # must not manufacture a warning: absent evidence is not evidence of staleness.
+    age = state.get("index_age") if isinstance(state.get("index_age"), dict) else None
+    stale = bool(age and age.get("stale"))
+    detail = "cannot tell — no /state answer to read an index age from"
+    if age is not None:
+        dirty = int(age.get("dirty_files") or 0)
+        detail = (f"index behind working tree — {dirty} file(s) changed since the last "
+                  f"index; run `loom index --repo {repo} --repo-root PATH --changed`"
+                  if stale else
+                  "index matches the working tree" if age.get("indexed_at") else
+                  f"'{repo}' has never been indexed — see the row above")
+    row("index staleness", not stale, detail, warn=stale)
 
     pad = max(len(name) for _s, name, _d in rows)
     print(f"loom doctor — {start}")

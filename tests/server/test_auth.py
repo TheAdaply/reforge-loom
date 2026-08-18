@@ -387,7 +387,7 @@ def test_doctor_is_all_pass_on_a_tokened_rig(token_server, tmp_path, monkeypatch
     rows, code = doctor(monkeypatch, capsys, root)
 
     assert code == 0
-    assert [s for s, _d in rows.values()] == ["PASS"] * 9
+    assert [s for s, _d in rows.values()] == ["PASS"] * 10
     assert "auth=token" in rows["server"][1]
     assert rows["auth"] == ("PASS", "shared token accepted")
 

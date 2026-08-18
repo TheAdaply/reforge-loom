@@ -99,6 +99,8 @@ def test_the_fixture_repo_is_below_the_focus_threshold_and_untruncated(live_serv
     assert "const BEAD_CAP = 14;" in page                              # 14 beads per thread
     assert "files with active claims surface automatically" in page    # exact scope-note copy
     assert "graph truncated to first 600 nodes" in page                # exact §2 copy
+    assert "index behind working tree" in page                         # exact U2 copy
+    assert "loom index --changed refreshes" in page                    # ...naming its own fix
     assert 'id="nNodes"' in page                                       # the totals-fed tile
 
     state = json.loads(_get(base + "/state")[1])
@@ -106,6 +108,9 @@ def test_the_fixture_repo_is_below_the_focus_threshold_and_untruncated(live_serv
     assert len(files) == 4 and len(files) <= 12          # ≤ 12 files → today's full view
     assert state["truncated"] == {"nodes": False, "edges": False}   # → no truncation note
     assert state["totals"]["nodes"] == state["counts"]["nodes"]     # tile == honest COUNT(*)
+    # U2: the seeded fixture graph was INSERTed, never indexed, so there is no index event
+    # to be behind — the note stays off and the header keeps its frozen single line.
+    assert state["index_age"] == {"indexed_at": None, "dirty_files": 0, "stale": False}
 
 
 def test_state_shape_and_claims(live_server):

@@ -1,8 +1,10 @@
-"""MULTIREPO-SPEC §4 + §6.f + ITERATION-2-SPEC D11 — `loom doctor`, the nine-check table.
+"""MULTIREPO-SPEC §4 + §6.f + ITERATION-2-SPEC D11 + U2 — `loom doctor`, the ten-check table.
 
 The rig is deliberately REAL end to end: a subprocess server over two served repos (only
 one of them indexed, so the WARN branch has ground to stand on), a checkout wired by the
 actual `loom init` verb, and the actual `loom-gate` console script for the round-trip.
+`alpha` is served from a COPY of the fixture repo under `tmp_path` so the staleness test
+(U2) can push a file's mtime forward without ever writing to `tests/fixtures/`.
 Nothing here is stubbed except `HOME`, which is redirected into tmp so the developer's own
 `~/.loom/config.toml` can never leak into a check (and the gate's audit log lands in tmp).
 
@@ -14,7 +16,9 @@ tells an operator nothing about where to look.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -32,7 +36,7 @@ FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 PYREPO = str(FIXTURES / "pyrepo")
 PYREPO2 = str(FIXTURES / "pyrepo2")
 CHECKS = ("config", "server", "auth", "repo match", "gate binary", "hook registered",
-          "mcp registered", "gate round-trip", "index freshness")
+          "mcp registered", "gate round-trip", "index freshness", "index staleness")
 ROW = re.compile(r"^\s+(PASS|FAIL|WARN)\s\s(.+?)\s\s+(.*)$")
 
 
@@ -48,21 +52,28 @@ def free_port() -> int:
         s.close()
 
 
+def alpha_root(tmp_path) -> Path:
+    """Where `doctor_server` serves `alpha` from — a writable copy, computable by tests."""
+    return tmp_path / "alpha"
+
+
 @pytest.fixture()
 def doctor_server(tmp_path) -> Iterator[tuple[str, subprocess.Popen]]:
     """A server over `alpha` (indexed) and `beta` (served but NEVER indexed)."""
+    root = alpha_root(tmp_path)
+    shutil.copytree(PYREPO, root)
     db = str(tmp_path / "doctor.sqlite3")
     init_db(db)
     conn = connect(db)
     try:
-        index_repo(conn, "alpha", PYREPO, changed_only=False)
+        index_repo(conn, "alpha", str(root), changed_only=False)
     finally:
         conn.close()
     port = free_port()
     # `python -m loom.server.app`, not `loom serve`: serve indexes every root at boot,
     # which would quietly index `beta` and take the freshness WARN away.
     proc = subprocess.Popen(
-        [sys.executable, "-m", "loom.server.app", "--repo-root", f"alpha={PYREPO}",
+        [sys.executable, "-m", "loom.server.app", "--repo-root", f"alpha={root}",
          "--repo-root", f"beta={PYREPO2}", "--db", db, "--host", "127.0.0.1",
          "--port", str(port)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
@@ -114,7 +125,7 @@ def doctor(monkeypatch: pytest.MonkeyPatch, capsys, root: Path) -> tuple[Rows, i
     cap = capsys.readouterr()
     rows: Rows = {m.group(2).strip(): (m.group(1), m.group(3))
                   for m in map(ROW.match, cap.out.splitlines()) if m}
-    assert list(rows) == list(CHECKS), cap.out    # all nine, always, in spec order
+    assert list(rows) == list(CHECKS), cap.out    # all ten, always, in spec order
     return rows, code, cap.err
 
 
@@ -133,7 +144,7 @@ def test_doctor_passes_every_check_on_a_wired_checkout(
     rows, code, _err = doctor(monkeypatch, capsys, root)
 
     assert code == 0
-    assert statuses(rows) == ["PASS"] * 9
+    assert statuses(rows) == ["PASS"] * 10
     assert str(root / ".claude" / "loom.toml") in rows["config"][1]
     assert "repo=alpha" in rows["config"][1] and "agent=aria" in rows["config"][1]
     assert "alpha, beta" in rows["server"][1]        # served names, printed verbatim
@@ -142,6 +153,7 @@ def test_doctor_passes_every_check_on_a_wired_checkout(
     assert "loom-gate" in rows["gate binary"][1]
     assert "exit 2" in rows["gate round-trip"][1]    # the real chain, not a stub
     assert re.match(r"\d+ node\(s\) indexed for 'alpha'", rows["index freshness"][1])
+    assert rows["index staleness"] == ("PASS", "index matches the working tree")
 
 
 def test_doctor_warns_but_exits_zero_when_the_repo_is_unindexed(
@@ -156,7 +168,35 @@ def test_doctor_warns_but_exits_zero_when_the_repo_is_unindexed(
     assert rows["index freshness"][0] == "WARN"
     assert "loom index --repo beta" in rows["index freshness"][1]
     assert rows["repo match"] == ("PASS", "'beta' is served")
-    assert statuses(rows, skip="index freshness") == ["PASS"] * 8
+    # U2 does not double-report an ABSENT graph as a BEHIND one: never-indexed is not stale.
+    assert rows["index staleness"] == ("PASS", "'beta' has never been indexed — see the row above")
+    assert statuses(rows, skip="index freshness") == ["PASS"] * 9
+
+
+def test_doctor_warns_when_the_index_is_behind_the_working_tree(
+        doctor_server, tmp_path, monkeypatch, capsys) -> None:
+    """U2: the graph exists and looks healthy; the tree has simply moved past it.
+
+    The mtimes are pushed FORWARD (not merely to `now`) so the assertion cannot depend on
+    `iso()`'s one-second truncation grace, and they are pushed BEFORE the verb runs — the
+    first `/state` doctor makes is its auth probe, and that call warms the 5s index-age
+    cache the staleness row then reads.
+    """
+    base, _proc = doctor_server
+    root = wired(monkeypatch, tmp_path, base, "alpha")
+    future = time.time() + 5
+    for name in ("svc.py", "up.py"):
+        os.utime(alpha_root(tmp_path) / name, (future, future))
+
+    rows, code, _err = doctor(monkeypatch, capsys, root)
+
+    assert code == 0                                 # WARN alone never fails the run
+    status, detail = rows["index staleness"]
+    assert status == "WARN"
+    assert "2 file(s) changed" in detail
+    assert "loom index --repo alpha" in detail and "--changed" in detail
+    assert rows["index freshness"][0] == "PASS"      # the graph is there, just behind
+    assert statuses(rows, skip="index staleness") == ["PASS"] * 9
 
 
 def test_doctor_fails_on_a_dead_server(doctor_server, tmp_path, monkeypatch, capsys) -> None:
@@ -192,7 +232,7 @@ def test_doctor_fails_when_the_hook_is_not_registered(
     assert rows["hook registered"][0] == "FAIL"
     assert "run loom init" in rows["hook registered"][1]
     assert str(settings) in rows["hook registered"][1]
-    assert statuses(rows, skip="hook registered") == ["PASS"] * 8
+    assert statuses(rows, skip="hook registered") == ["PASS"] * 9
 
 
 def test_doctor_fails_a_checkout_that_was_never_initialized(

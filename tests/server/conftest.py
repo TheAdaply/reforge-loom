@@ -8,7 +8,7 @@ topology is deliberate:
     svc.py       ──IMPORTS─▶ util.py                (radius 0: never expanded)
     models.py::User, iso.py::lonely                 (disjoint — safe re-declare ground)
 
-CONTAINS mirrors what M1 mints (`walk.py::_index_tree`, tests/indexer EXPECTED_CONTAINS):
+CONTAINS mirrors what M1 mints (`walk.py::_write_file_nodes`, tests/indexer EXPECTED_CONTAINS):
 src = container, dst = contained, one edge per nesting level, so the chain is
 `svc.py -> svc.py::AuthService -> svc.py::AuthService/authenticate`. Both endpoints are
 FULL refs — a bare `"AuthService"` would mint the id of a nonexistent FILE node named

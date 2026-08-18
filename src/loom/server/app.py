@@ -25,6 +25,7 @@ import os
 import sqlite3
 import threading
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 from mcp.server import MCPServer
 from starlette.requests import Request
@@ -51,6 +52,24 @@ STATE_EDGE_CAP = 1500
 # deliberately absent (it is how a client LEARNS a token is required) and so is `/`, which
 # serves a static shell and no repo data.
 PROTECTED_PATHS = ("/gate", "/state", "/mcp")
+
+# U2 — how long one repo's mtime scan is reused. A module constant for the same reason the
+# caps above are: a test lowers it with one `monkeypatch.setattr`. Staleness is a HINT, so
+# a 5s-old answer is always good enough, and the poll loop must never turn the dashboard
+# into an `os.walk` generator.
+INDEX_AGE_TTL_S = 5.0
+
+# `iso()` TRUNCATES to whole seconds, so an `indexed_at` read back out of `events` is up to
+# 1s EARLIER than the moment the index actually ran — and every file written in that same
+# second would read as dirty forever. One second of grace cancels the truncation exactly.
+# The cost is the honest converse: an edit landing inside the index's own second is not
+# reported until the next edit. `loom index --changed` compares sha256, never mtime, so it
+# still picks that edit up; only the HINT is late.
+_INDEX_AGE_GRACE_S = 1.0
+
+# (repo, repo_root) -> (expires_at, payload). Plain dict on purpose: two threads racing here
+# recompute the same answer and the loser overwrites with an equal value. No lock (§2).
+_index_age_cache: dict[tuple[str, str], tuple[float, dict]] = {}
 
 
 def _template(name: str) -> str:
@@ -194,7 +213,55 @@ class TokenAuth:
         await self.app(scope, receive, send)
 
 
-def state_payload(c: sqlite3.Connection, repo: str, served: list[str]) -> dict:
+def _epoch(stamp: str) -> float | None:
+    """Inverse of `db.iso` — `None` for anything that is not a loom timestamp."""
+    try:
+        return datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).timestamp()
+    except (TypeError, ValueError):                                  # pragma: no cover
+        return None
+
+
+def index_age(c: sqlite3.Connection, repo: str, repo_root: str, now: float) -> dict:
+    """U2 — how far the graph has fallen behind the working tree, as a VERDICT.
+
+    `{"indexed_at": <unix s | None>, "dirty_files": <count>, "stale": <bool>}`.
+
+    Softened from graphify (Apache-2.0) `graphify/cli.py:668-697`, whose PreToolUse hook
+    swaps its orientation nudge for a stale one when the target file's mtime beats the
+    graph's — "#1840(b): soften, never block". loom takes the posture and drops the
+    coupling: this is reported on `/state` (dashboard + `loom doctor`) and NOWHERE on
+    `/gate`, whose five wire keys are frozen and whose 1.5s budget cannot afford a tree
+    scan. An agent is never blocked, slowed, or nagged by this number; a human sees it.
+
+    STAT ONLY, never a re-hash: the answer is a hint, and `index_repo` remains the sole
+    authority on what actually changed (it re-reads and re-hashes every file). A repo that
+    has never been indexed is not stale, it is absent — `dirty_files` stays 0 and the
+    doctor's `index freshness` row is the one that speaks.
+    """
+    key = (repo, repo_root)
+    cached = _index_age_cache.get(key)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    row = c.execute("SELECT MAX(ts) AS ts FROM events WHERE repo = ? AND actor = 'indexer' "
+                    "AND action = 'indexed'", (repo,)).fetchone()
+    at = _epoch(row["ts"]) if row and row["ts"] else None
+    dirty = 0
+    if at is not None and repo_root:
+        from loom.indexer.walk import discover_files  # lazy: keeps tree-sitter off the
+        cutoff = at + _INDEX_AGE_GRACE_S              # import path of a serve-only process
+        for rel in discover_files(repo_root):
+            try:
+                if os.stat(os.path.join(repo_root, *rel.split("/"))).st_mtime > cutoff:
+                    dirty += 1
+            except OSError:                           # vanished mid-scan: the next index
+                continue                              # will notice; this hint need not
+    out = {"indexed_at": at, "dirty_files": dirty, "stale": dirty > 0}
+    _index_age_cache[key] = (now + INDEX_AGE_TTL_S, out)
+    return out
+
+
+def state_payload(c: sqlite3.Connection, repo: str, served: list[str],
+                  repo_root: str = "") -> dict:
     """The `/state` body for ONE repo (D5), caps and all — extracted from the route so the
     cap arithmetic is unit-testable without an HTTP client.
 
@@ -239,6 +306,7 @@ def state_payload(c: sqlite3.Connection, repo: str, served: list[str]) -> dict:
                    "plans": len(plans), "claims": len(claims)},
         "totals": {"nodes": total_nodes, "edges": total_edges},
         "truncated": {"nodes": len(nodes) < total_nodes, "edges": len(edges) < total_edges},
+        "index_age": index_age(c, repo, repo_root, now),
         "nodes": nodes, "edges": edges, "plans": plans, "claims": claims,
         "events": events, "agents": list(dict.fromkeys(agents)),
     }
@@ -298,9 +366,11 @@ def build_server(db_path: str, repos: dict[str, str], token: str = "") -> MCPSer
         broken dashboard. Caps keep the payload sane on big repos — and, since D7, SAY SO:
         `totals`/`truncated` sit beside the post-LIMIT `counts`. spec_md is deliberately
         NOT shipped (8KB x poll). `repos` ships every served name so the page can render a
-        switcher without a second endpoint."""
+        switcher without a second endpoint. `index_age` (U2) is the one field computed off
+        the FILESYSTEM rather than the db — `repos[repo]` is the root it scans."""
         try:
-            return JSONResponse(state_payload(conn(), selected(request), served))
+            repo = selected(request)
+            return JSONResponse(state_payload(conn(), repo, served, repos[repo]))
         except sqlite3.OperationalError as exc:
             return JSONResponse({"ok": False, "error": type(exc).__name__})
 

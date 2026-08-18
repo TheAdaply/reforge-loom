@@ -1,9 +1,30 @@
 """BUILD-SPEC §9.1 — repo discovery and the two-pass tree-sitter indexer (M1).
 
-INCREMENTAL CAVEAT, ACCEPTED FOR MVP (falkordb C5): `changed_only` re-resolves only files
-whose sha256 moved, and `delete_file_nodes` drops every edge touching a re-indexed file,
-so inbound CALLS/IMPORTS from UNCHANGED files go stale until those files change. A full
-`index_repo(..., changed_only=False)` always restores the complete graph.
+COLD ≡ INCREMENTAL, BY CONSTRUCTION (U1). `changed_only` decides which files get their
+NODE ROWS re-minted; it decides nothing about edges. Pass 2 wipes this repo's CALLS and
+IMPORTS and re-resolves them from the whole, up-to-date node set every run, so
+`index_repo(changed_only=True)` and a cold `index_repo(changed_only=False)` over the same
+tree produce the SAME graph — pinned by
+`tests/indexer/test_incremental.py::test_incremental_equals_cold_index`.
+
+Inspired by graft (MIT) `src/graph/build.ts:211-284` + `test/graph-incremental.test.ts`:
+memoize the per-file extraction, but hand `resolveEdges` the whole node set, and freeze the
+discipline with a cold-equals-incremental test. graft can skip the re-parse because it
+persists each file's unresolved `rawEdges` alongside its nodes; loom's call sites live only
+in the tree-sitter tree, so unchanged files are re-PARSED and only their DB writes are
+skipped. That is not laziness, it is required: `Resolver`'s bare-name fallback and its
+dotted-suffix module lookup both resolve only when EXACTLY ONE file matches, so adding or
+removing a def in file F can flip an edge in a file that has no edge to F at all. "Re-resolve
+only the files whose edges touch changed files" would therefore still decay.
+
+MEASURED PRICE of that honesty, one file touched, warm cache, M-series laptop:
+conduit (78 files / 527 nodes / 1116 edges) 11ms -> 57ms, against 61ms for a cold index;
+graphiti (198 files / 1877 nodes / 3981 edges) 15ms -> 148ms, against 160ms cold.
+So an incremental run now costs ~92% of a cold one and the sha256 memo buys back only the
+node-row churn. At ~0.15s for a 200-file repo that is far inside `loom index`'s budget, and
+it is not on the gate's 1.5s/2.5s hook path at all — the gate reads the graph, it never
+builds it. A repo large enough to feel this wants graft's persisted per-file raw-edge table,
+which is a schema change, not a scheduling one.
 
 §11.11 keeps SQL out of call sites: every statement loom issues against `nodes`/`edges`
 lives in the `_put`/`_edge` helpers or in `delete_file_nodes`/`index_repo` directly.
@@ -114,14 +135,21 @@ def delete_file_nodes(conn: sqlite3.Connection, repo: str, rel_path: str) -> Non
     log_event(conn, "indexer", "indexed", f"deleted {rel_path} ({len(ids)} nodes)", repo)
 
 
-def _index_tree(conn, repo: str, rel: str, src: bytes, tree: Any) -> list[tuple[str, str, int, int]]:
-    """Re-mint one file's File/Class/Function nodes + CONTAINS edges. Idempotent."""
+def _write_file_nodes(conn, repo: str, rel: str, src: bytes,
+                      ents: list[tuple[str, str, Any]]) -> None:
+    """Re-mint one file's File/Class/Function nodes + CONTAINS edges. Idempotent.
+
+    `ents` is `_entities(tree.root_node)`, computed by the caller for EVERY file (resolution
+    needs the spans regardless) and handed here only for the files whose bytes moved — so
+    node rows, their ids and their `updated` stamps stay untouched for unchanged files.
+    CONTAINS is the one edge kind minted here: it never crosses a file, so a changed file's
+    `delete_file_nodes` can never strand an unchanged file's CONTAINS edge.
+    """
     delete_file_nodes(conn, repo, rel)
     now, file_id = iso(now_s()), node_id(repo, rel, "")
     _put(conn, (file_id, repo, rel, "", "File", _sha(src), "", 1, src.count(b"\n") + 1, now))
     owners: dict[int, str] = {}
-    ents: list[tuple[str, str, int, int]] = []
-    for q, kind, n in _entities(tree.root_node):
+    for q, kind, n in ents:
         nid = node_id(repo, rel, q)
         body = n.child_by_field_name("body")
         head = src[n.start_byte:(body.start_byte if body is not None else n.end_byte)]
@@ -135,8 +163,6 @@ def _index_tree(conn, repo: str, rel: str, src: bytes, tree: Any) -> list[tuple[
             p = p.parent
         owners[n.id] = nid
         _edge(conn, owner, nid, "CONTAINS")  # src = container (File|Class), dst = contained
-        ents.append((q, kind, n.start_byte, n.end_byte))
-    return ents
 
 
 def index_repo(conn, repo: str, repo_root: str, changed_only: bool = False) -> dict[str, Any]:
@@ -144,29 +170,40 @@ def index_repo(conn, repo: str, repo_root: str, changed_only: bool = False) -> d
     files = discover_files(repo_root)
     known = {r["path"]: r["body_hash"] for r in
              conn.execute("SELECT path, body_hash FROM nodes WHERE repo=? AND qualname=''", (repo,))}
+    # Every file is read and hashed EVERY run, incremental or not (graft build.ts:211-220
+    # makes the same call): a stat may decide whether a query bothers re-indexing, it may
+    # not decide what the re-index itself looks at, or a same-length edit inside one mtime
+    # tick becomes permanently invisible.
     sources: dict[str, bytes] = {}
     for rel in files:
         with open(os.path.join(repo_root, *rel.split("/")), "rb") as fh:
-            src = fh.read()
-        if not (changed_only and known.get(rel) == _sha(src)):
-            sources[rel] = src
-    changed = sorted(sources)
+            sources[rel] = fh.read()
+    changed = [rel for rel in files
+               if not (changed_only and known.get(rel) == _sha(sources[rel]))]
+    fresh = set(changed)
     for rel in sorted(set(known) - set(files)):
         delete_file_nodes(conn, repo, rel)
         changed.append(rel)
-    # Pass 1: nodes + CONTAINS for changed files; def/module tables for the WHOLE repo.
+    # Pass 1: parse EVERY file (spans and call sites live only in the tree), but re-mint
+    # node rows only for the files whose bytes moved. The resolver is therefore fed exactly
+    # the same inputs on an incremental run as on a cold one — that identity IS the fix.
     res, trees = Resolver(), {}
-    for rel in sorted(sources):
-        trees[rel] = _PARSER.parse(sources[rel])
-        ents = _index_tree(conn, repo, rel, sources[rel], trees[rel])
-        res.add_known(rel, {q: k for q, k, _, _ in ents}, [(s, e, q) for q, _, s, e in ents])
-        res.index_file(rel, trees[rel])
     for rel in files:
-        if rel not in trees:  # unchanged: defs come from the DB, never a re-parse
-            res.add_known(rel, {r["qualname"]: r["kind"] for r in conn.execute(
-                "SELECT qualname, kind FROM nodes WHERE repo=? AND path=? AND qualname<>''", (repo, rel))})
-    # Pass 2: File->File IMPORTS (src = importer), then bucketed CALLS (src = caller).
-    for rel in sorted(trees):
+        trees[rel] = _PARSER.parse(sources[rel])
+        ents = _entities(trees[rel].root_node)
+        if rel in fresh:
+            _write_file_nodes(conn, repo, rel, sources[rel], ents)
+        res.add_known(rel, {q: k for q, k, _ in ents},
+                      [(n.start_byte, n.end_byte, q) for q, _, n in ents])
+        res.index_file(rel, trees[rel])
+    # Pass 2: whole-graph edge resolution. Both resolved kinds are dropped for the WHOLE
+    # repo first — `delete_file_nodes` alone would leave an unchanged caller's CALLS edge
+    # pointing at a callee that has since moved, and would never restore the inbound edge
+    # it deleted when the callee was re-minted (the U1 decay). Both `src` columns are
+    # in-repo by the frozen edge directions, so this touches no other repo's rows.
+    conn.execute("DELETE FROM edges WHERE kind IN ('CALLS','IMPORTS') AND src IN"
+                 " (SELECT id FROM nodes WHERE repo=?)", (repo,))
+    for rel in files:  # File->File IMPORTS (src = importer), then bucketed CALLS (src = caller).
         for dst in res.resolve_imports(rel):
             _edge(conn, node_id(repo, rel, ""), node_id(repo, dst, ""), "IMPORTS")
         for sq, dp, dq in res.resolve_calls(rel, trees[rel]):

@@ -506,3 +506,60 @@ class TestPathSuffixResolution:
         self._seed_deep(gconn)
         rows = resolve_query(gconn, "demo", "auth.py")
         assert [(r["path"], r["qualname"]) for r in rows] == [("src/api/routes/auth.py", "")]
+
+
+class TestFuzzyTailGate:
+    """U3: §5.2's LAST rung — bare substring on the query tail — refuses low-information
+    queries instead of guessing (graphiti `dedup_helpers`: gate the fuzzy path, never the
+    exact ones; escalate on ambiguity). The failure being closed is not a bad suggestion,
+    it is a bad CLAIM: `_resolve_all` promotes a lone substring hit straight to a write
+    claim, so `run` could take `Server/runner` while the agent meant something else.
+    """
+
+    @staticmethod
+    def _seed(gconn, quals: list[str]) -> None:
+        from loom.server.db import iso, now_s
+        from loom.server.ids import node_id
+        gconn.executemany(
+            "INSERT OR IGNORE INTO nodes (id, repo, path, qualname, kind, updated) "
+            "VALUES (?,?,?,?,?,?)",
+            [(node_id("demo", "srv.py", q), "demo", "srv.py", q, "Function", iso(now_s()))
+             for q in quals])
+
+    def test_a_short_tail_refuses_even_when_it_would_have_resolved_uniquely(self, gconn):
+        """The exact live defect: one accidental substring hit used to become a claim."""
+        self._seed(gconn, ["Server/runner"])
+        assert claims.resolve_query(gconn, "demo", "run") == []
+
+    def test_a_four_character_unique_tail_still_resolves(self, gconn):
+        self._seed(gconn, ["Server/runner"])
+        rows = claims.resolve_query(gconn, "demo", "unne")
+        assert [(r["path"], r["qualname"]) for r in rows] == [("srv.py", "Server/runner")]
+
+    def test_the_gate_counts_symbols_not_characters(self, gconn):
+        """Three sharing a tail is still an answer (all three come back as candidates, and
+        `_resolve_all` refuses to pick); a fourth means the tail names nothing in particular."""
+        self._seed(gconn, ["A/handle", "B/handler", "C/handled"])
+        assert len(claims.resolve_query(gconn, "demo", "handl")) == 3
+
+        self._seed(gconn, ["D/handles"])
+        assert claims.resolve_query(gconn, "demo", "handl") == []
+
+    def test_the_exact_and_boundary_rungs_are_untouched_by_the_length_gate(self, gconn):
+        """`go` is two characters and must STILL resolve: it is a '/'-boundary suffix, not a
+        fuzzy match. Gating it would break every short method name in the repo."""
+        self._seed(gconn, ["Runner/go"])
+        rows = claims.resolve_query(gconn, "demo", "go")
+        assert [(r["path"], r["qualname"]) for r in rows] == [("srv.py", "Runner/go")]
+
+    def test_a_refused_query_lands_on_the_honest_unresolved_path(self, gconn):
+        """`hen` is a substring of `AuthService/authenticate` and of nothing else in the
+        fixture, so it used to claim it outright. Now it declares nothing and says why."""
+        r = declare(gconn, "aria", ["hen"])
+
+        assert r["ok"] is False and r["reason"] == "validation"
+        assert r["unresolved"][0]["query"] == "hen"
+        assert 0 < len(r["unresolved"][0]["suggestions"]) <= 5
+        assert gconn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 0
+        # ...while the 6-character tail of the same symbol still resolves (frozen above).
+        assert [r["id"] for r in claims.resolve_query(gconn, REPO, "hentic")] == [nid(AUTH)]

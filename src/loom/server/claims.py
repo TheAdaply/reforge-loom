@@ -30,6 +30,12 @@ CLOSURE_MAX_NODES = 5000     # bound on one CONTAINS walk (§4 hierarchy); a pat
                              # graph must never stall the gate's fast read path.
 _SQL_VARS = 400              # IN(...) chunk size, well under SQLite's variable limit.
 
+# U3 — the gate on §5.2's fuzzy last rung (see `_fuzzy_tail`). Module constants, not magic
+# numbers: they are the two questions "is this query specific enough to claim on?" splits
+# into, and a test moves them without rewriting a query.
+FUZZY_MIN_TAIL = 4           # 'run', 'get', 'db' name too many things to name one.
+FUZZY_MAX_HITS = 3           # ...and so does any tail this many distinct symbols share.
+
 # §7.4 verbatim. UNSCOPED is hook-local (locator.py, M3) and never lives here.
 FOREIGN_CLAIM_TMPL = """loom: BLOCKED — {ref} is claimed by "{owner_agent}" under plan {owner_plan_id} "{owner_title}", expires {owner_expires_iso} (in {minutes}m).
 Its spec follows. Build against its declared interfaces, or rescope your plan around it, or wait for expiry.
@@ -112,7 +118,12 @@ def sweep(conn: sqlite3.Connection, repo: str, now: float) -> list[str]:
 
 
 def resolve_query(conn: sqlite3.Connection, repo: str, q: str) -> list[sqlite3.Row]:
-    """§5.2 resolution order, first hit wins; returns ALL candidates so callers never guess."""
+    """§5.2 resolution order, first hit wins; returns ALL candidates so callers never guess.
+
+    The last rung — a bare substring match on the query's tail — is the only FUZZY one, and
+    the only one gated (U3, below). Every step above it is an exact or a '/'-boundary match
+    and is untouched.
+    """
     path, qual = split_ref(q)
     steps = [                                            # exact ref -> path-suffix ref ->
         ("path=? AND qualname=?", (norm_path(path), qual)) if qual else None,
@@ -121,9 +132,8 @@ def resolve_query(conn: sqlite3.Connection, repo: str, q: str) -> list[sqlite3.R
         # the qualname half always had (found in the conduit tryout, iteration 2).
         ("path LIKE '%/' || ? AND qualname=?", (norm_path(path), qual)) if qual else None,
         ("(path=? OR path LIKE '%/' || ?) AND qualname=''",
-         (norm_path(q), norm_path(q))),                  # file -> qualname suffix -> substring.
+         (norm_path(q), norm_path(q))),                  # file -> qualname suffix.
         ("(qualname=? OR qualname LIKE '%/' || ?)", (q, q)),
-        ("qualname LIKE '%' || ? || '%' AND qualname<>''", (q.rsplit("/", 1)[-1],)),
     ]
     for step in steps:
         if step is None:
@@ -132,7 +142,33 @@ def resolve_query(conn: sqlite3.Connection, repo: str, q: str) -> list[sqlite3.R
                             + step[0], (repo, *step[1])).fetchall()
         if rows:
             return rows
-    return []
+    return _fuzzy_tail(conn, repo, q.rsplit("/", 1)[-1])
+
+
+def _fuzzy_tail(conn: sqlite3.Connection, repo: str, tail: str) -> list[sqlite3.Row]:
+    """§5.2's last rung, behind U3's information gate: substring match or NOTHING.
+
+    Ported from graphiti (Apache-2.0) `graphiti_core/utils/maintenance/dedup_helpers.py`
+    — `_has_high_entropy` (:79-85) refuses the MinHash path for short, low-information
+    names, and `_resolve_with_similarity` (:246-250) escalates on ambiguity instead of
+    picking a winner; exact matching is never gated. loom keeps the posture and drops the
+    entropy arithmetic: over qualnames, `len` and `COUNT(*)` measure the same thing Shannon
+    entropy was standing in for, and a threshold an agent can predict beats one it cannot.
+
+    loom's stakes are higher than graphiti's. A single accidental substring hit is not a
+    ranked suggestion here — `_resolve_all` sees `len(rows) == 1` and promotes it straight
+    to a CLAIM, so `run` could quietly claim `Server/run` while the agent meant
+    `Pipeline/run`. Refusing returns `[]`, which drops the caller onto the honest path it
+    already has: unresolved, with ranked `suggestions` the agent picks from by hand.
+    """
+    if len(tail) < FUZZY_MIN_TAIL:
+        return []                                        # too little information to claim on
+    rows = conn.execute("SELECT id, path, qualname, kind FROM nodes WHERE repo=? AND "
+                        "qualname LIKE '%' || ? || '%' AND qualname<>''",
+                        (repo, tail)).fetchall()
+    # Each row is one distinct symbol (nodes are UNIQUE on repo/path/qualname), so this
+    # counts symbols, not duplicates. A tail that names this many things names none of them.
+    return [] if len(rows) > FUZZY_MAX_HITS else rows
 
 
 def suggestions(conn: sqlite3.Connection, repo: str, q: str) -> list[str]:

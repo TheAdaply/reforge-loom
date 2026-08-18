@@ -273,6 +273,13 @@ function fabricSVG(state) {
     `showing ${view.length} of ${all.length} files — files with active claims surface automatically`)}</span>`;
   if (state.truncated && (state.truncated.nodes || state.truncated.edges))
     note += `<span class="note"> · graph truncated to first 600 nodes</span>`;
+  // U2: the picture is only as true as its last index, so the header says when it is not.
+  // Quiet by design — same --ink-2 .note as the scope line, no colour, no badge: a stale
+  // graph is a thing to refresh, never an alarm, and it names its own one-command fix.
+  const age = state.index_age;
+  if (age && age.stale)
+    note += `<span class="note"> · ${esc(`index behind working tree — ${age.dirty_files} ` +
+      `file${age.dirty_files === 1 ? "" : "s"} changed; loom index --changed refreshes`)}</span>`;
   return {
     svg: `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="code graph with live claims">${edges}${threads}${beads}</svg>`,
     note,
