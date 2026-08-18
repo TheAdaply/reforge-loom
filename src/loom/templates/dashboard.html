@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>loom</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 2v12M8 2v12M13 2v12' stroke='%230b0b0b' stroke-width='1.6'/%3E%3Cpath d='M1 6h14M1 10h14' stroke='%232a78d6' stroke-width='1.6'/%3E%3C/svg%3E">
+<style>
+  /* Light-only by commitment ("nothing dark"): every color painted explicitly. */
+  :root {
+    color-scheme: light;
+    --paper: #fcfcfb; --card: #ffffff; --ink: #0b0b0b; --ink-2: #52514e;
+    --line: #e7e6e2; --line-soft: #f0efec; --free: #b9b7ae;
+    --a1: #2a78d6; --a2: #eb6834; --a3: #1baf7a; --a-more: #8b897f;
+    --deny: #e34948; --allow: #008300; --warn: #eda100;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 1.25rem; flex-wrap: wrap;
+    padding: 1rem 1.5rem .8rem; border-bottom: 1px solid var(--line);
+  }
+  .wordmark {
+    font-family: "Avenir Next", Avenir, Futura, system-ui, sans-serif;
+    font-size: 1.35rem; font-weight: 600; letter-spacing: .18em;
+    border-bottom: 3px double var(--ink); padding-bottom: 2px;
+  }
+  .repo { font-family: var(--mono); color: var(--ink-2); }
+  .live { display: inline-flex; align-items: center; gap: .45em; color: var(--ink-2); font-size: .85rem; }
+  .live .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--allow); }
+  .live.down .dot { background: var(--deny); }
+  .chips { display: flex; gap: .6rem; margin-left: auto; flex-wrap: wrap; }
+  .chip {
+    display: inline-flex; align-items: center; gap: .45em; font-family: var(--mono);
+    font-size: .82rem; padding: .2em .65em; border: 1px solid var(--line);
+    border-radius: 999px; background: var(--card);
+  }
+  .chip .swatch { width: 9px; height: 9px; border-radius: 50%; }
+  main {
+    display: grid; grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr);
+    gap: 1.25rem; padding: 1.25rem 1.5rem; align-items: start;
+  }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
+  .panel h2 {
+    margin: 0; padding: .65rem .9rem; font-size: .72rem; font-weight: 600;
+    letter-spacing: .12em; text-transform: uppercase; color: var(--ink-2);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  #fabric { padding: .5rem .5rem .75rem; }
+  #fabric svg { display: block; width: 100%; height: auto; }
+  .rail { display: flex; flex-direction: column; gap: 1.25rem; min-width: 0; }
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: .75rem; }
+  .tile {
+    background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+    padding: .6rem .8rem;
+  }
+  .tile b {
+    display: block; font-family: var(--mono); font-size: 1.45rem; font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .tile.denies b { color: var(--deny); }
+  .tile span { font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-2); }
+  .plans, .feed { list-style: none; margin: 0; padding: .35rem 0; max-height: 300px; overflow-y: auto; }
+  .plans li { display: flex; gap: .7rem; padding: .55rem .9rem; border-bottom: 1px solid var(--line-soft); }
+  .plans li:last-child, .feed li:last-child { border-bottom: 0; }
+  .plans .bar { width: 4px; border-radius: 2px; flex: none; }
+  .plans .who { font-family: var(--mono); font-size: .82rem; color: var(--ink-2); }
+  .plans .title { font-weight: 550; }
+  .plans .ttl { margin-left: auto; font-family: var(--mono); font-size: .8rem; color: var(--ink-2); white-space: nowrap; }
+  .feed li {
+    display: flex; gap: .6rem; align-items: baseline; padding: .4rem .9rem;
+    border-bottom: 1px solid var(--line-soft); font-family: var(--mono); font-size: .8rem;
+  }
+  .feed .t { color: var(--ink-2); flex: none; }
+  .feed .badge {
+    flex: none; font-size: .72rem; padding: .05em .5em; border-radius: 4px;
+    border: 1px solid var(--line); color: var(--ink-2);
+  }
+  .feed .badge.deny  { color: var(--deny);  border-color: var(--deny);  }
+  .feed .badge.allow { color: var(--allow); border-color: var(--allow); }
+  .feed .badge.plan  { color: var(--ink); }
+  .feed .detail { overflow-wrap: anywhere; }
+  .empty { padding: 1rem .9rem; color: var(--ink-2); font-size: .85rem; }
+  #tip {
+    position: fixed; pointer-events: none; display: none; z-index: 10;
+    background: var(--ink); color: var(--paper); font-family: var(--mono);
+    font-size: .78rem; padding: .45em .7em; border-radius: 6px; max-width: 340px;
+  }
+  #banner {
+    display: none; padding: .5rem 1.5rem; background: #fdf1e6; color: #8a4a12;
+    font-size: .85rem; border-bottom: 1px solid var(--line);
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .bead { transition: fill 150ms linear; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <span class="wordmark">loom</span>
+  <span class="repo" id="repoName">—</span>
+  <span class="live" id="live"><span class="dot"></span><span id="liveText">connecting</span></span>
+  <span class="chips" id="chips" aria-label="agents"></span>
+</header>
+<div id="banner">reconnecting to the loom server…</div>
+<main>
+  <section class="panel">
+    <h2>the fabric — files as threads, symbols as beads, claims as color</h2>
+    <div id="fabric"><div class="empty">loading the graph…</div></div>
+  </section>
+  <div class="rail">
+    <div class="tiles">
+      <div class="tile"><b id="nAgents">0</b><span>agents</span></div>
+      <div class="tile"><b id="nPlans">0</b><span>active plans</span></div>
+      <div class="tile"><b id="nClaims">0</b><span>claims held</span></div>
+      <div class="tile denies"><b id="nDenies">0</b><span>denies (recent)</span></div>
+    </div>
+    <section class="panel">
+      <h2>active plans</h2>
+      <ul class="plans" id="plans"><li class="empty">no active plans — agents declare via the loom MCP tools</li></ul>
+    </section>
+    <section class="panel">
+      <h2>gate activity</h2>
+      <ul class="feed" id="feed"><li class="empty">no events yet</li></ul>
+    </section>
+  </div>
+</main>
+<div id="tip" role="tooltip"></div>
+<script>
+"use strict";
+const AGENT_COLORS = ["#2a78d6", "#eb6834", "#1baf7a"];    // validated all-pairs safe trio
+const MORE = "#8b897f";                                     // 4th+ agents share neutral, chips carry names
+const agentSlot = new Map();                                // first-seen, stable — color follows the entity
+const el = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function colorOf(agent) {
+  if (!agentSlot.has(agent)) agentSlot.set(agent, agentSlot.size);
+  const i = agentSlot.get(agent);
+  return i < AGENT_COLORS.length ? AGENT_COLORS[i] : MORE;
+}
+
+function fmtTTL(expires, now) {
+  const s = Math.max(0, Math.round(expires - now));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")} left`;
+}
+
+function fabricSVG(state) {
+  const byFile = new Map();
+  for (const n of state.nodes) {
+    if (!byFile.has(n.path)) byFile.set(n.path, { file: null, beads: [] });
+    (n.qualname ? byFile.get(n.path).beads : [byFile.get(n.path)]).length; // noop guard
+    if (n.qualname) byFile.get(n.path).beads.push(n); else byFile.get(n.path).file = n;
+  }
+  const files = [...byFile.keys()].sort();
+  const claimBy = new Map(state.claims.map(c => [c.node_id, c]));
+  const planTitle = new Map(state.plans.map(p => [p.id, p.title]));
+  const colW = 118, top = 66, rowH = 34, pad = 24;
+  const maxBeads = Math.max(1, ...[...byFile.values()].map(f => f.beads.length));
+  const W = pad * 2 + files.length * colW, H = top + maxBeads * rowH + pad;
+  const pos = new Map();
+  files.forEach((path, i) => {
+    const x = pad + i * colW + colW / 2;
+    const f = byFile.get(path);
+    if (f.file) pos.set(f.file.id, { x, y: top - 26 });
+    f.beads.forEach((b, j) => pos.set(b.id, { x, y: top + j * rowH + 14 }));
+  });
+  let edges = "";
+  for (const e of state.edges) {
+    const a = pos.get(e.src), b = pos.get(e.dst);
+    if (!a || !b || a === b) continue;
+    const mx = (a.x + b.x) / 2, bow = a.x === b.x ? 26 : 0;
+    const dash = e.kind === "IMPORTS" ? ' stroke-dasharray="3 4"' : "";
+    edges += `<path d="M${a.x + bow} ${a.y} Q ${mx + bow + (a.x === b.x ? 14 : 0)} ${(a.y + b.y) / 2} ${b.x + bow} ${b.y}" fill="none" stroke="#eceae4" stroke-width="1.25"${dash}/>`;
+  }
+  let threads = "", beads = "";
+  files.forEach((path, i) => {
+    const x = pad + i * colW + colW / 2;
+    const f = byFile.get(path);
+    const yEnd = top + Math.max(1, f.beads.length) * rowH - rowH + 14;
+    threads += `<line x1="${x}" y1="${top - 8}" x2="${x}" y2="${yEnd}" stroke="#eceae5" stroke-width="2"/>`;
+    const short = path.length > 16 ? "…" + path.slice(-15) : path;
+    const fc = f.file && claimBy.get(f.file.id);
+    const fileFill = fc ? colorOf(fc.agent) : "#52514e";
+    threads += `<text x="${x}" y="${top - 34}" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10.5" fill="${fileFill}" data-node="${esc(f.file ? f.file.id : "")}">${esc(short)}</text>`;
+    f.beads.forEach(b => {
+      const p = pos.get(b.id), c = claimBy.get(b.id);
+      const name = b.qualname.split("/").pop();
+      const label = name.length > 12 ? name.slice(0, 11) + "…" : name;
+      let fill = "#fcfcfb", stroke = "#b9b7ae", sw = 1.4;
+      if (c) { stroke = colorOf(c.agent); sw = 2;
+               fill = c.mode === "write" ? colorOf(c.agent) : "#fcfcfb"; }
+      const tip = esc(`${b.path}::${b.qualname}` + (c ?
+        `\n${c.mode} · ${c.agent} · ${planTitle.get(c.plan_id) || c.plan_id}` : "\nunclaimed"));
+      beads += `<g class="beadhit" data-tip="${tip}">` +
+        `<circle cx="${p.x}" cy="${p.y}" r="13" fill="transparent"/>` +
+        `<circle class="bead" cx="${p.x}" cy="${p.y}" r="7" fill="${fill}" stroke="#fcfcfb" stroke-width="3.5"/>` +
+        `<circle cx="${p.x}" cy="${p.y}" r="7" fill="none" stroke="${stroke}" stroke-width="${sw}"/>` +
+        `<text x="${p.x + 14}" y="${p.y + 3.5}" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#52514e">${esc(label)}</text></g>`;
+    });
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="code graph with live claims">${edges}${threads}${beads}</svg>`;
+}
+
+function render(state) {
+  el("repoName").textContent = state.repo;
+  el("liveText").textContent = "live";
+  el("live").classList.remove("down");
+  el("banner").style.display = "none";
+  for (const p of state.plans) colorOf(p.agent);           // fix slots by plan order first
+  const denies = state.events.filter(e => e.action === "denied").length;
+  el("nAgents").textContent = state.agents.length;
+  el("nPlans").textContent = state.counts.plans;
+  el("nClaims").textContent = state.counts.claims;
+  el("nDenies").textContent = denies;
+  el("chips").innerHTML = state.agents.map(a =>
+    `<span class="chip"><span class="swatch" style="background:${colorOf(a)}"></span>${esc(a)}</span>`).join("")
+    || '<span class="chip">no agents yet</span>';
+  el("plans").innerHTML = state.plans.map(p =>
+    `<li><span class="bar" style="background:${colorOf(p.agent)}"></span>
+     <span><span class="title">${esc(p.title)}</span><br><span class="who">${esc(p.agent)} · ${esc(p.id)}</span></span>
+     <span class="ttl">${fmtTTL(p.ttl_expires, state.now)}</span></li>`).join("")
+    || '<li class="empty">no active plans — agents declare via the loom MCP tools</li>';
+  el("feed").innerHTML = state.events.map(e => {
+    const cls = e.action === "denied" ? "deny" : (e.action === "allowed" ? "allow" : "plan");
+    const word = e.action === "denied" ? "✕ deny" : (e.action === "allowed" ? "✓ allow" : e.action);
+    return `<li><span class="t">${esc(String(e.ts).slice(11, 19))}</span>
+      <span class="badge ${cls}">${esc(word)}</span>
+      <span class="detail">${esc(e.actor)} · ${esc(e.detail)}</span></li>`;
+  }).join("") || '<li class="empty">no events yet</li>';
+  el("fabric").innerHTML = fabricSVG(state);
+}
+
+const tip = el("tip");
+document.addEventListener("mousemove", ev => {
+  const g = ev.target.closest && ev.target.closest(".beadhit");
+  if (g) {
+    tip.style.display = "block";
+    tip.textContent = g.dataset.tip;
+    tip.style.left = Math.min(ev.clientX + 14, innerWidth - 320) + "px";
+    tip.style.top = (ev.clientY + 14) + "px";
+  } else tip.style.display = "none";
+});
+
+async function poll() {
+  if (document.hidden) return;
+  try {
+    const r = await fetch("/state");
+    const s = await r.json();
+    if (s.ok) render(s);
+    else throw new Error(s.error || "not ok");
+  } catch {
+    el("liveText").textContent = "reconnecting";
+    el("live").classList.add("down");
+    el("banner").style.display = "block";
+  }
+}
+poll();
+setInterval(poll, 2000);
+</script>
+</body>
+</html>

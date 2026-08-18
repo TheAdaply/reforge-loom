@@ -1,0 +1,101 @@
+"""Dashboard endpoints: / serves the page, /state serves the poll feed (fail-soft)."""
+
+from __future__ import annotations
+
+import json
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
+from collections.abc import Iterator
+
+import pytest
+
+from loom.server.claims import declare_plan
+from loom.server.db import connect, immediate, now_s
+
+SPEC = """# Spec: Dashboard test plan
+
+## Goal *(mandatory)*
+Exercise the state feed. Two sentences to satisfy the validator shape.
+
+## Write targets *(mandatory)*
+- svc.py::AuthService/authenticate
+
+## New/changed interfaces *(mandatory)*
+None.
+
+## Assumes *(mandatory)*
+None.
+
+## Out of scope *(mandatory)*
+Everything else.
+"""
+
+
+@pytest.fixture()
+def live_server(graph_db, tmp_path) -> Iterator[tuple[str, str]]:
+    """(base_url, db_path) of a subprocess server over the seeded fixture graph."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "loom.server.app", "--repo-root", str(tmp_path),
+         "--repo", "demo", "--port", str(port), "--host", "127.0.0.1", "--db", graph_db],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            with socket.socket() as s:
+                if s.connect_ex(("127.0.0.1", port)) == 0:
+                    break
+            time.sleep(0.15)
+        yield f"http://127.0.0.1:{port}", graph_db
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:  # pragma: no cover
+            proc.kill()
+
+
+def _get(url: str) -> tuple[int, str]:
+    with urllib.request.urlopen(url, timeout=10) as resp:
+        return resp.status, resp.read().decode("utf-8")
+
+
+def test_dashboard_page_serves(live_server):
+    base, _db = live_server
+    status, body = _get(base + "/")
+    assert status == 200
+    assert "<title>loom</title>" in body
+    assert "the fabric" in body  # signature panel present
+
+
+def test_state_shape_and_claims(live_server):
+    base, db = live_server
+    conn = connect(db)
+    row = conn.execute("SELECT repo, id FROM nodes WHERE qualname LIKE '%authenticate%'").fetchone()
+    repo = row["repo"]
+    with immediate(conn):
+        granted = declare_plan(
+            conn, agent="dash-agent", repo=repo, branch="main", title="Dashboard test plan",
+            spec_md=SPEC, write_targets=["svc.py::AuthService/authenticate"], assumes=[],
+            ttl_s=600, now=now_s())
+    assert granted["ok"], granted
+
+    status, body = _get(base + "/state")
+    assert status == 200
+    state = json.loads(body)
+    assert state["ok"] is True
+    assert state["repo"] == repo
+    assert isinstance(state["now"], float)
+    assert state["counts"]["nodes"] > 0 and state["counts"]["edges"] > 0
+    assert {n["id"] for n in state["nodes"]} >= {row["id"]}
+    assert any(p["agent"] == "dash-agent" for p in state["plans"])
+    assert "spec_md" not in state["plans"][0]  # deliberately not shipped per poll
+    claimed = {c["node_id"] for c in state["claims"]}
+    assert row["id"] in claimed  # the declared target is visibly claimed
+    assert "dash-agent" in state["agents"]
+    assert any(e["action"] == "declared" for e in state["events"])

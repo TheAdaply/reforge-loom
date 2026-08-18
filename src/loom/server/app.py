@@ -88,6 +88,59 @@ def build_server(db_path: str, repo: str, repo_root: str) -> MCPServer:
         """Plain-HTTP liveness used by `loom init` to learn the repo salt (§11.19)."""
         return JSONResponse({"ok": True, "repo": repo})
 
+    @mcp.custom_route("/", methods=["GET"])
+    async def dashboard_route(request: Request) -> Response:
+        """The one-page read-only dashboard (PLAN §7 'visibility', brought into MVP)."""
+        page = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                            "templates", "dashboard.html")
+        with open(page, encoding="utf-8") as fh:
+            return Response(fh.read(), media_type="text/html")
+
+    @mcp.custom_route("/state", methods=["GET"])
+    async def state_route(request: Request) -> Response:
+        """Dashboard poll feed. Fail-soft: under writer contention return ok:false with
+        HTTP 200 — the page shows 'reconnecting', never a broken dashboard. Caps keep the
+        payload sane on big repos; spec_md is deliberately NOT shipped (8KB x poll)."""
+        try:
+            c = conn()
+            now = now_s()
+            nodes = [dict(r) for r in c.execute(
+                "SELECT id, path, qualname, kind FROM nodes WHERE repo = ? "
+                "ORDER BY path, qualname LIMIT 600", (repo,))]
+            edges = [dict(r) for r in c.execute(
+                "SELECT e.src, e.dst, e.kind FROM edges e JOIN nodes n ON n.id = e.src "
+                "WHERE n.repo = ? LIMIT 1500", (repo,))]
+            plans = [dict(r) for r in c.execute(
+                "SELECT id, agent, title, created, ttl_expires FROM plans "
+                "WHERE repo = ? AND status = 'active' AND ttl_expires > ? "
+                "ORDER BY created", (repo, now))]
+            active_ids = [p["id"] for p in plans]
+            claims = []
+            if active_ids:
+                marks = ",".join("?" * len(active_ids))
+                claims = [dict(r) for r in c.execute(
+                    f"SELECT c.node_id, c.plan_id, c.mode, p.agent FROM claims c "
+                    f"JOIN plans p ON p.id = c.plan_id "
+                    f"WHERE c.released IS NULL AND c.plan_id IN ({marks})", active_ids)]
+            events = [dict(r) for r in c.execute(
+                "SELECT ts, actor, action, detail FROM events "
+                "ORDER BY rowid DESC LIMIT 50")]
+            agents = [p["agent"] for p in plans]
+            agents += [e["actor"] for e in reversed(events)
+                       if e["actor"] not in ("indexer",)]
+            seen: dict[str, None] = {}
+            for a in agents:
+                seen.setdefault(a, None)
+            return JSONResponse({
+                "ok": True, "repo": repo, "now": now,
+                "counts": {"nodes": len(nodes), "edges": len(edges),
+                           "plans": len(plans), "claims": len(claims)},
+                "nodes": nodes, "edges": edges, "plans": plans, "claims": claims,
+                "events": events, "agents": list(seen),
+            })
+        except sqlite3.OperationalError as exc:
+            return JSONResponse({"ok": False, "error": type(exc).__name__})
+
     @mcp.custom_route("/gate", methods=["POST"])
     async def gate_route(request: Request) -> Response:
         """§6 wire contract. Always HTTP 200 with exactly the five frozen keys."""
