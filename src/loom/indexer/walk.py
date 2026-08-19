@@ -42,7 +42,7 @@ from tree_sitter import Parser
 from loom.indexer.naming import norm_path
 from loom.indexer.naming import qualname as join_qualname
 from loom.indexer.queries.python import LANGUAGE, Q_DEFS, Resolver, matches
-from loom.server.db import iso, log_event, now_s
+from loom.server.db import immediate, iso, log_event, now_s
 from loom.server.ids import node_id
 
 # Directories never walked (BUILD-SPEC §9.1): tooling and vendor trees ONLY. The frozen set
@@ -194,8 +194,23 @@ def _write_file_nodes(conn, repo: str, rel: str, src: bytes,
         _edge(conn, owner, nid, "CONTAINS")  # src = container (File|Class), dst = contained
 
 
+_CHUNK_FILES = 64
+# BC3-2 (§11.45): node writes land in _CHUNK_FILES-sized transactions, so the write lock is
+# RELEASED between chunks. A whole-rebuild lock made every /gate audit/renew write on a big
+# tree exceed the hook's 1.5s budget and fail OPEN across every repo the database serves.
+
+
 def index_repo(conn, repo: str, repo_root: str, changed_only: bool = False) -> dict[str, Any]:
-    """Two-pass index of a repo. Returns `{files, nodes, edges, changed}` (repo totals)."""
+    """Two-pass index of a repo. Returns `{files, nodes, edges, changed}` (repo totals).
+
+    OWNS its transactions (§11.45): callers must NOT wrap this in `db.immediate()`. Parsing
+    runs outside any transaction (pure CPU — the lock is not held while tree-sitter runs);
+    node writes commit per `_CHUNK_FILES` chunk, each file's delete-then-insert atomic
+    inside its chunk; the CALLS/IMPORTS swap stays ONE transaction — a reader must never
+    see the edge set half-rebuilt. A reader between chunks sees some files re-minted and
+    others not yet: the same self-healing state a crashed index leaves, cured by the next
+    run (U1 cold≡incremental).
+    """
     files = discover_files(repo_root)
     known = {r["path"]: r["body_hash"] for r in
              conn.execute("SELECT path, body_hash FROM nodes WHERE repo=? AND qualname=''", (repo,))}
@@ -216,48 +231,59 @@ def index_repo(conn, repo: str, repo_root: str, changed_only: bool = False) -> d
     changed = [rel for rel in files
                if not (changed_only and known.get(rel) == _sha(sources[rel]))]
     fresh = set(changed)
-    for rel in sorted(set(known) - set(files)):
-        delete_file_nodes(conn, repo, rel)
-        changed.append(rel)
-    # Pass 1: parse EVERY file (spans and call sites live only in the tree), but re-mint
-    # node rows only for the files whose bytes moved. The resolver is therefore fed exactly
-    # the same inputs on an incremental run as on a cold one — that identity IS the fix.
-    res, trees = Resolver(), {}
+    gone = sorted(set(known) - set(files))
+    changed += gone
+    # Pass 1a: parse EVERY py file (spans and call sites live only in the tree), fresh or
+    # not — the resolver is fed exactly the same inputs on an incremental run as on a cold
+    # one, and that identity IS the U1 fix. Pure CPU, zero writes, no lock held.
+    res, trees, ents_by = Resolver(), {}, {}
     py_files = [rel for rel in files if rel.endswith(".py")]
-    for rel in files:
-        if not rel.endswith(".py"):
-            # Non-Python: File node only (fresh-gated) — enough for file-level claims and
-            # gating in any language (bench E3); no symbols, no edges.
-            if rel in fresh:
-                _write_file_nodes(conn, repo, rel, sources[rel], [])
-            continue
+    for rel in py_files:
         trees[rel] = _PARSER.parse(sources[rel])
         ents = _entities(trees[rel].root_node)
-        if rel in fresh:
-            _write_file_nodes(conn, repo, rel, sources[rel], ents)
+        ents_by[rel] = ents
         res.add_known(rel, {q: k for q, k, _ in ents},
                       [(n.start_byte, n.end_byte, q) for q, _, n in ents])
         res.index_file(rel, trees[rel])
+    # Pass 1b: node writes, chunked. Non-Python files get a File node only — enough for
+    # file-level claims and gating in any language (bench E3); no symbols, no edges.
+    if gone:
+        with immediate(conn):
+            for rel in gone:
+                delete_file_nodes(conn, repo, rel)
+    fresh_list = [rel for rel in files if rel in fresh]
+    for i in range(0, len(fresh_list), _CHUNK_FILES):
+        with immediate(conn):
+            for rel in fresh_list[i:i + _CHUNK_FILES]:
+                _write_file_nodes(conn, repo, rel, sources[rel], ents_by.get(rel, []))
     sources.clear()          # every remaining pass reads `trees`, not bytes
-    # Pass 2: whole-graph edge resolution. Both resolved kinds are dropped for the WHOLE
-    # repo first — `delete_file_nodes` alone would leave an unchanged caller's CALLS edge
-    # pointing at a callee that has since moved, and would never restore the inbound edge
-    # it deleted when the callee was re-minted (the U1 decay). Both `src` columns are
-    # in-repo by the frozen edge directions, so this touches no other repo's rows.
-    conn.execute("DELETE FROM edges WHERE kind IN ('CALLS','IMPORTS') AND src IN"
-                 " (SELECT id FROM nodes WHERE repo=?)", (repo,))
-    for rel in py_files:  # File->File IMPORTS (src = importer), then bucketed CALLS (src = caller).
+    # Pass 2a: whole-graph edge RESOLUTION — tree-walking CPU work, pure in-memory, so it
+    # runs before the transaction opens; the lock is never held while the resolver thinks.
+    edge_rows: list[tuple[str, str, str]] = []
+    for rel in py_files:  # File->File IMPORTS (src = importer), then CALLS (src = caller).
         for dst in res.resolve_imports(rel):
-            _edge(conn, node_id(repo, rel, ""), node_id(repo, dst, ""), "IMPORTS")
+            edge_rows.append((node_id(repo, rel, ""), node_id(repo, dst, ""), "IMPORTS"))
         for sq, dp, dq in res.resolve_calls(rel, trees[rel]):
-            _edge(conn, node_id(repo, rel, sq), node_id(repo, dp, dq), "CALLS")
-    # Refresh SQLite's planner statistics: without this, declare_plan's closure queries
-    # flip to a table-scan plan at ~django-tests scale — 9.3s vs 3.9ms, the 2,402x cliff
-    # bench E2 measured and its judge reproduced. One statement, every index run.
-    conn.execute("ANALYZE")
-    n = conn.execute("SELECT COUNT(*) c FROM nodes WHERE repo=?", (repo,)).fetchone()["c"]
-    e = conn.execute("SELECT COUNT(*) c FROM edges WHERE src IN"
-                     " (SELECT id FROM nodes WHERE repo=?)", (repo,)).fetchone()["c"]
-    log_event(conn, "indexer", "indexed",
-              f"{repo}: {len(files)} files, {n} nodes, {e} edges, {len(changed)} changed", repo)
+            edge_rows.append((node_id(repo, rel, sq), node_id(repo, dp, dq), "CALLS"))
+    # Pass 2b: the edge SWAP, one transaction of pure SQL. Both resolved kinds are dropped
+    # for the WHOLE repo first — `delete_file_nodes` alone would leave an unchanged
+    # caller's CALLS edge pointing at a callee that has since moved, and would never
+    # restore the inbound edge it deleted when the callee was re-minted (the U1 decay).
+    # Both `src` columns are in-repo by the frozen edge directions, so this touches no
+    # other repo's rows.
+    with immediate(conn):
+        conn.execute("DELETE FROM edges WHERE kind IN ('CALLS','IMPORTS') AND src IN"
+                     " (SELECT id FROM nodes WHERE repo=?)", (repo,))
+        for src, dst, kind in edge_rows:
+            _edge(conn, src, dst, kind)
+        # Refresh SQLite's planner statistics: without this, declare_plan's closure queries
+        # flip to a table-scan plan at ~django-tests scale — 9.3s vs 3.9ms, the 2,402x
+        # cliff bench E2 measured and its judge reproduced. One statement, every index run.
+        conn.execute("ANALYZE")
+        n = conn.execute("SELECT COUNT(*) c FROM nodes WHERE repo=?", (repo,)).fetchone()["c"]
+        e = conn.execute("SELECT COUNT(*) c FROM edges WHERE src IN"
+                         " (SELECT id FROM nodes WHERE repo=?)", (repo,)).fetchone()["c"]
+        log_event(conn, "indexer", "indexed",
+                  f"{repo}: {len(files)} files, {n} nodes, {e} edges, {len(changed)} changed",
+                  repo)
     return {"files": len(files), "nodes": n, "edges": e, "changed": changed}

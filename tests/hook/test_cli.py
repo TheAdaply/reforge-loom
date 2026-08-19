@@ -458,19 +458,12 @@ def test_index_honours_an_explicit_repo_salt(tmp_path, monkeypatch, capsys) -> N
     con.close()
 
 
-def test_index_warns_the_operator_that_it_holds_the_write_lock(tmp_path, monkeypatch,
-                                                               capsys) -> None:
-    """break3 chaos-F1 mitigation: the silent multi-second coordination gap gets a voice.
-
-    `_index` wraps the whole rebuild in one `BEGIN IMMEDIATE`. On a big tree that lock is
-    held for seconds, and the gate is not a pure reader — its audit row and its implicit
-    renew are writes — so live `/gate` calls blew past the hook's 1.5s timeout and FAILED
-    OPEN, across every repo on the database, with no signal anywhere. Chunking the rebuild
-    is the real fix and is backlog; this row is the operator's warning that it is happening.
-
-    The notice goes to STDERR on purpose: `loom index`'s stdout is one line of JSON that
-    callers parse, and it must stay that.
-    """
+def test_index_tells_the_operator_the_lock_is_per_chunk(tmp_path, monkeypatch,
+                                                        capsys) -> None:
+    """break3 chaos-F1, closed by §11.45: `index_repo` now owns its transactions and the
+    whole-rebuild WARNING is retired — its trigger no longer exists. The stderr notice
+    states the new contract (per-chunk lock) and the duration; stdout stays one line of
+    JSON that callers parse."""
     repo_root = tmp_path / "repo"
     (repo_root / "src").mkdir(parents=True)
     (repo_root / "src" / "mod.py").write_text("def f():\n    return 1\n", encoding="utf-8")
@@ -480,8 +473,8 @@ def test_index_warns_the_operator_that_it_holds_the_write_lock(tmp_path, monkeyp
 
     cap = capsys.readouterr()
     assert json.loads(cap.out.strip())["repo"] == "repo"        # stdout is still just JSON
-    assert "WARNING" in cap.err and "write lock" in cap.err and "fail OPEN" in cap.err
-    assert "released the write lock after" in cap.err           # ...and for how long
+    assert "write lock taken per chunk" in cap.err
+    assert "WARNING" not in cap.err                             # the scary path is gone
 
 
 def test_init_gitignores_the_identity_file(tmp_path, monkeypatch):

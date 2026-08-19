@@ -154,32 +154,16 @@ def _index(db: str, repo: str, repo_root: str, changed_only: bool | None) -> dic
             # "warm for this salt", or a second repo's first index would run incremental.
             changed_only = conn.execute("SELECT 1 FROM nodes WHERE repo=? LIMIT 1",
                                         (repo,)).fetchone() is not None
-        # ONE transaction for the whole rebuild. `connect` is autocommit, and the two-pass
-        # walk deletes before it writes: between those autocommits a file has zero node
-        # rows, so a concurrent /gate resolves `new_path` and ALLOWS over a live foreign
-        # claim — silently, reading as normal. Pass 2 has the same window for edges, which
-        # leaves a plan declared inside it with no CALLS expansion for its whole lifetime.
-        # The price is the write lock held for the parse (~150ms per 200 files); concurrent
-        # declares queue on `busy_timeout` instead of racing, and WAL readers keep the
-        # pre-index snapshot throughout. That is the trade worth making.
-        #
-        # On a BIG repo that price is seconds, and the gate is not only a reader: its audit
-        # row and its implicit renew are writes, so on a 6000-file tree the breaker measured
-        # a run of `/gate` calls timing out and FAILING OPEN across every repo on the server,
-        # with nothing anywhere saying why (break3 chaos-F1). Closing the window properly
-        # means chunking the rebuild or indexing into a shadow table and swapping — a design
-        # change, and backlog. Until then the operator at least gets told, on stderr, that
-        # this is the process holding the lock and roughly for how long it held it.
-        sys.stderr.write(
-            f"loom: WARNING — indexing '{repo}' takes the loom write lock for the whole "
-            "rebuild; while it is held, /gate calls that need to write can exceed the hook's "
-            "1.5s budget and fail OPEN (advisory, uncoordinated edits) on every repo this "
-            "database serves\n")
+        # `index_repo` OWNS its transactions (§11.45, closing break3 chaos-F1): parsing
+        # runs lock-free, node writes commit in chunks so concurrent /gate audit/renew
+        # writes queue for one chunk at most, and only the edge swap is a single
+        # transaction. Wrapping it in `immediate()` here would be a nested-BEGIN error —
+        # and would re-create the whole-rebuild lock that made big-tree gate calls
+        # exceed the hook budget and fail OPEN across every repo this database serves.
         started = time.monotonic()
-        with immediate(conn):
-            stats = index_repo(conn, repo, repo_root, changed_only=changed_only)
-        sys.stderr.write(f"loom: index of '{repo}' released the write lock after "
-                         f"{time.monotonic() - started:.1f}s\n")
+        stats = index_repo(conn, repo, repo_root, changed_only=changed_only)
+        sys.stderr.write(f"loom: indexed '{repo}' in {time.monotonic() - started:.1f}s "
+                         "(write lock taken per chunk, never for the whole rebuild)\n")
     finally:
         conn.close()
     return stats

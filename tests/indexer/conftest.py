@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from loom.indexer.walk import index_repo
-from loom.server.db import connect, immediate, init_db
+from loom.server.db import connect, init_db
 from loom.server.ids import node_ref
 
 FIXTURE_SRC = Path(__file__).resolve().parents[1] / "fixtures" / "pyrepo"
@@ -31,8 +31,8 @@ class Graph:
         self.conn, self.root = conn, root
 
     def reindex(self, changed_only: bool = True) -> dict:
-        with immediate(self.conn) as c:
-            return index_repo(c, self.repo, self.root, changed_only=changed_only)
+        # index_repo owns its transactions (§11.45) — wrapping it would nest BEGINs.
+        return index_repo(self.conn, self.repo, self.root, changed_only=changed_only)
 
     def nodes(self) -> dict[str, tuple[str, str, str]]:
         """node_id -> (path, qualname, kind)."""

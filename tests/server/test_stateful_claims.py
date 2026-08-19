@@ -94,8 +94,7 @@ def _index_template() -> tuple[list[tuple], list[tuple]]:
         db = os.path.join(tmp, "loom.sqlite3")
         init_db(db)
         c = connect(db)
-        with immediate(c) as cc:
-            index_repo(cc, REPO, root, changed_only=False)
+        index_repo(c, REPO, root, changed_only=False)   # owns its transactions (§11.45)
         nodes = [tuple(r) for r in c.execute(
             "SELECT id,repo,path,qualname,kind,body_hash,sig_hash,start_line,end_line,updated "
             "FROM nodes")]

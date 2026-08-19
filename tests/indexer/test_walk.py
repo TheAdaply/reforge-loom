@@ -239,3 +239,48 @@ def test_looms_own_database_files_are_never_indexed(repo_root: str) -> None:
         with open(os.path.join(repo_root, f), "w") as fh:
             fh.write("x")
     assert not [p for p in discover_files(repo_root) if ".loom.sqlite3" in p]
+
+
+def test_index_repo_commits_per_chunk_never_one_rebuild_lock(graph, monkeypatch) -> None:
+    """break3 chaos-F1 / §11.45: the write lock is RELEASED between chunks — a cold index
+    of the 8-file fixture at chunk size 2 must COMMIT several times, not once. (The old
+    whole-rebuild transaction made big-tree /gate writes exceed the hook budget and fail
+    open across every repo the database serves.)"""
+    import loom.indexer.walk as walk
+
+    monkeypatch.setattr(walk, "_CHUNK_FILES", 2)
+    commits: list[str] = []
+    graph.conn.set_trace_callback(
+        lambda stmt: commits.append(stmt) if "COMMIT" in stmt.upper() else None)
+    graph.reindex(changed_only=False)
+    graph.conn.set_trace_callback(None)
+    assert len(commits) >= 4        # ceil(8 files / 2 per chunk) plus the atomic edge swap
+
+
+def test_a_crashed_index_heals_on_the_next_run(graph, monkeypatch) -> None:
+    """§11.45: a crash mid-chunks leaves a partial node set — the dying chunk rolls back,
+    committed chunks stay — and the next full run converges, byte-for-byte idempotent."""
+    import loom.indexer.walk as walk
+
+    graph.write("nova.py", "def nova():\n    return 1\n")
+    monkeypatch.setattr(walk, "_CHUNK_FILES", 2)
+    real = walk._write_file_nodes
+    seen = {"n": 0}
+
+    def dying(conn, repo, rel, source, ents):
+        seen["n"] += 1
+        if seen["n"] == 3:
+            raise RuntimeError("chaos: index died mid-chunk")
+        return real(conn, repo, rel, source, ents)
+
+    monkeypatch.setattr(walk, "_write_file_nodes", dying)
+    with pytest.raises(RuntimeError):
+        graph.reindex(changed_only=False)
+    monkeypatch.setattr(walk, "_write_file_nodes", real)
+    # Heal via the DEPLOYED path — the warm/incremental run serve boots with: files the
+    # crash rolled back hash-mismatch and re-mint, survivors hash-match and skip.
+    graph.reindex(changed_only=True)
+    assert ("nova.py", "nova", "Function") in set(graph.nodes().values())
+    before = (graph.nodes(), graph.raw_edges())
+    graph.reindex(changed_only=False)
+    assert (graph.nodes(), graph.raw_edges()) == before

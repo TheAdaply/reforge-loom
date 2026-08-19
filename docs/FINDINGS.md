@@ -586,10 +586,14 @@ the design-needed remainders — no code for them landed in this cycle.
   runs the law as written unconditionally (the `LOOM_FUZZ_STRICT` knob is gone). File-granular
   conflicts stay out (council W2 preserved: named targets still contend up∪down; swept nodes
   exact+up only).
-- **BC3-2 — index concurrency (chaos F1).** `loom index` holds one `BEGIN IMMEDIATE` for the
-  whole rebuild; gate audit/renew writes block past the hook's 1.5 s budget and fail OPEN across
-  every repo the server's database serves. This cycle landed only the operator stderr warning;
-  closing the window needs chunked indexing or shadow-index-and-swap.
+- **BC3-2 — index concurrency (chaos F1). FIXED (§11.45)**: `index_repo` owns its transactions —
+  parse lock-free, node writes per 64-file chunk, edge swap atomic. Gate writes queue for one
+  chunk at most instead of the whole rebuild; the operator WARNING retired with its trigger.
+  Pinned by `test_index_repo_commits_per_chunk_never_one_rebuild_lock` and
+  `test_a_crashed_index_heals_on_the_next_run` (which heals via the deployed warm/incremental
+  path). Residual: the single edge-swap transaction — pure bulk SQL, resolution runs before the
+  lock — can still exceed the hook budget on enormous trees (window shrunk from whole-rebuild;
+  busy verdicts now surface as data, §11.41).
 - **BC3-3 — `/gate` "could not judge" wire case (from the F2 fix).** A failed `gate_decision`
   (e.g. disk full) now answers an advisory 200 reusing `case: "unindexed"` plus a stderr
   WARNING, so hook-side it is indistinguishable from an unindexed repo. Decide whether the frozen

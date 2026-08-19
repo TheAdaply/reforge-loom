@@ -1276,6 +1276,22 @@ spec-vs-args set-equality validation. IN and mandatory: hook fail-open exactly p
     Never blocking (§5's "an agent is never refused by itself" stands); rescope suppresses
     self-held for the plan being rescoped — widening onto your own ground is a no-op.
 
+45. **`index_repo` owns its transactions; the rebuild lock is per-chunk** (break3 chaos-F1,
+    FINDINGS BC3-2; amends §2's caller-owns-the-transaction convention for the indexer
+    ONLY). One BEGIN IMMEDIATE around the whole rebuild held the write lock for seconds on
+    big trees, and the gate is not a pure reader — its audit row and implicit renew are
+    writes — so live `/gate` calls blew past the hook's 1.5s budget and failed OPEN across
+    every repo on the database. Now: parsing runs lock-free (pure CPU); node writes commit
+    per `_CHUNK_FILES=64` chunk, each file's delete-then-insert atomic inside its chunk;
+    vanished-file deletions are one transaction; edge RESOLUTION (tree-walking CPU) runs
+    before the lock, so the CALLS/IMPORTS swap + ANALYZE + count + audit row are ONE
+    transaction of pure bulk SQL (a reader must never see the edge set half-rebuilt —
+    residual: that SQL can still exceed the hook budget on enormous trees, a far smaller
+    window than before). A reader between chunks sees some files re-minted
+    and others not — the same self-healing partial state a crashed index leaves, cured by
+    the next run (U1). Callers must NOT wrap `index_repo` in `immediate()` (nested-BEGIN
+    error); the CLI's whole-rebuild WARNING is retired with its trigger.
+
 ---
 
 ## 12. THIRD-PARTY NOTICES (frozen content for `THIRD_PARTY_NOTICES.md`)
