@@ -477,6 +477,36 @@ def test_index_tells_the_operator_the_lock_is_per_chunk(tmp_path, monkeypatch,
     assert "WARNING" not in cap.err                             # the scary path is gone
 
 
+def test_init_never_writes_through_a_claude_md_symlinked_out_of_the_repo(
+        tmp_path, monkeypatch, capsys):
+    """break3 J4e (BC3-4): CLAUDE.md as a symlink to a file OUTSIDE the repo means the
+    snippet append would mutate someone else's instructions file. Skip it, loudly, and
+    let the rest of init succeed; a symlink WITHIN the repo keeps working."""
+    from loom.cli import main as cli_mod
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    outside = tmp_path / "elsewhere.md"
+    outside.write_text("# not this repo's file\n", encoding="utf-8")
+    (repo_root / "CLAUDE.md").symlink_to(outside)
+    monkeypatch.setattr(cli_mod, "_health", lambda server: {"ok": True, "repos": ["testrepo"]})
+    monkeypatch.setattr(cli_mod.shutil, "which", lambda name: "/usr/bin/true-gate")
+    monkeypatch.setattr(cli_mod.subprocess, "run",
+                        lambda *a, **k: type("P", (), {"returncode": 2, "stderr": ""})())
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    run_cli(monkeypatch, "init", "--server", "http://127.0.0.1:9999",
+            "--agent", "t", "--repo-root", str(repo_root))
+    assert outside.read_text(encoding="utf-8") == "# not this repo's file\n"   # untouched
+    assert "symlink out of the repo" in capsys.readouterr().err
+    # A symlink WITHIN the repo is that repo's own layout choice — the append happens.
+    (repo_root / "CLAUDE.md").unlink()
+    (repo_root / "real.md").write_text("# mine\n", encoding="utf-8")
+    (repo_root / "CLAUDE.md").symlink_to(repo_root / "real.md")
+    run_cli(monkeypatch, "init", "--server", "http://127.0.0.1:9999",
+            "--agent", "t", "--repo-root", str(repo_root))
+    assert "loom" in (repo_root / "real.md").read_text(encoding="utf-8")
+
+
 def test_init_gitignores_the_identity_file(tmp_path, monkeypatch):
     """Two-user simulation finding: a teammate's `git add -A` must never be able to commit
     their per-user loom.toml into the shared repo (pulling it re-identifies everyone)."""

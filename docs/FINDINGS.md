@@ -594,18 +594,19 @@ the design-needed remainders — no code for them landed in this cycle.
   path). Residual: the single edge-swap transaction — pure bulk SQL, resolution runs before the
   lock — can still exceed the hook budget on enormous trees (window shrunk from whole-rebuild;
   busy verdicts now surface as data, §11.41).
-- **BC3-3 — `/gate` "could not judge" wire case (from the F2 fix).** A failed `gate_decision`
-  (e.g. disk full) now answers an advisory 200 reusing `case: "unindexed"` plus a stderr
-  WARNING, so hook-side it is indistinguishable from an unindexed repo. Decide whether the frozen
-  six-case wire enum gains a seventh case.
-- **BC3-4 (low) — `loom init` writes through a symlinked CLAUDE.md (journey J4e)** to a target
-  outside the repo. Refuse, or realpath-check, symlinked targets before appending the snippet.
+- **BC3-3 — `/gate` "could not judge" wire case. FIXED (§11.46)**: the enum gained `error` —
+  same advisory allow, same five keys, hook unchanged (branches on `decision` alone); audit and
+  incident reconstruction can now tell "repo not indexed" from "server failed to judge".
+- **BC3-4 (low) — `loom init` writes through a symlinked CLAUDE.md (journey J4e). FIXED
+  (§11.46)**: a CLAUDE.md symlinked OUT of the repo skips the snippet append with a stderr note
+  (init still succeeds); a within-repo symlink keeps working. Pinned in test_cli.
 - **BC3-5 (docs) — BUILD-SPEC §9.1 still prints the pre-W5 `EXCLUDE_DIRS`. FIXED** by §11.39
   (walk.py is the authority; tests/frontend/alembic indexed since W5). The two non-frozen copies
   of the same falsehood (README, troubleshooting) were corrected the cycle before.
-- **BC3-6 (tests) — the dashboard has no executable test.** `test_dashboard.py` string-matches
-  the page source only. A ~40-line stdlib-node harness that renders the page's own `<script>`
-  over real `/state` payloads exists at `scratchpad/break3/simplify/js/` — worth landing the
+- **BC3-6 (tests) — the dashboard has no executable test. FIXED (§11.46)**: the harness landed
+  as `tests/server/js/run.js` + `test_dashboard_script_executes_over_real_payloads` — runs the
+  page's own script under a stub DOM over three payload shapes, pins the §11.40 expanded-claim
+  tooltip and render determinism (skips where node is absent). Original sketch was at
   next time the fabric is touched.
 - **BC3-7 (ops note) — NFC re-index. FIXED**: troubleshooting.md "My edits are never blocked" now
   carries the upgrade note (pre-NFC databases hold decomposed path keys; one `loom index --repo

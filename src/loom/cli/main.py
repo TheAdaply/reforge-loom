@@ -283,6 +283,13 @@ def _append_snippet(repo_root: str) -> bool:
     with open(os.path.join(_templates(), "CLAUDE.snippet.md"), encoding="utf-8") as fh:
         snippet = fh.read()
     path, existing = os.path.join(repo_root, "CLAUDE.md"), ""
+    if os.path.islink(path) and not os.path.realpath(path).startswith(
+            os.path.realpath(repo_root) + os.sep):
+        # break3 J4e: a CLAUDE.md symlinked OUT of the repo means init would write through
+        # it into a file that is not this repo's. The snippet is advisory — skip, loudly.
+        sys.stderr.write("loom: CLAUDE.md is a symlink out of the repo; snippet NOT appended"
+                         " — add the loom section to the real instructions file yourself\n")
+        return False
     if os.path.exists(path):
         with open(path, encoding="utf-8") as fh:
             existing = fh.read()

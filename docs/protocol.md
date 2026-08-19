@@ -242,7 +242,7 @@ five keys:**
 The hook maps `deny` to exit code 2 with `message` on stderr, and everything else to exit 0 in
 silence.
 
-### The six cases
+### The seven cases
 
 | `case` | Decision | What it means |
 |---|---|---|
@@ -252,6 +252,7 @@ silence.
 | `no_plan` | **deny** | You have no active plan at all. Write a spec, resolve targets, declare. |
 | `new_path` | allow | The file exists in the repository but has no indexed nodes — a new file. Creating files is never gated. |
 | `unindexed` | allow | This repository has no graph at all, or is not served by this server. loom has nothing to judge with, so it does not pretend to judge. |
+| `error` | allow | The server itself failed to judge (a full disk, a locked database mid-query). Advisory allow, and the server operator gets a stderr WARNING — the audit trail is usually the thing that just failed. |
 
 `unindexed` is the silent-failure case worth knowing: a checkout whose configured repo name is not
 one the server serves will be allowed forever and look perfectly healthy. `loom doctor`'s

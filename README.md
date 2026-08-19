@@ -241,7 +241,7 @@ and a checkout wired by the real `loom init`.
 ## Documentation
 
 - [docs/README.md](docs/README.md) — index of every document, with a status column
-- [docs/protocol.md](docs/protocol.md) — the nine MCP tools, the `/gate` wire, the six cases
+- [docs/protocol.md](docs/protocol.md) — the nine MCP tools, the `/gate` wire, the seven cases
 - [docs/architecture.md](docs/architecture.md) — how the pieces fit and why
 - [docs/operations.md](docs/operations.md) — running a server: database, backups, re-indexing
 - [docs/troubleshooting.md](docs/troubleshooting.md) — one section per `loom doctor` row

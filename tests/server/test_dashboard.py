@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import urllib.request
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from conftest import server_process
 
+from loom.cli.main import _templates
 from loom.server.claims import SWEEP_GRACE_S, declare_plan, sweep
 from loom.server.db import connect, immediate, iso, now_s
 
@@ -150,3 +154,68 @@ def test_a_ttl_sweep_does_not_grow_a_system_actor_chip(live_server):
     assert "indexer" not in state["agents"]
     # ... while the audit trail of the sweep is still on the feed.
     assert any(e["action"] == "expired" and e["actor"] == "loom" for e in state["events"])
+
+
+def _mini_state(**over) -> dict:
+    """The smallest /state payload `render()` accepts, with a real claim mix."""
+    nodes = [
+        {"id": "n-f1", "path": "svc.py", "qualname": "", "kind": "File"},
+        {"id": "n-c1", "path": "svc.py", "qualname": "AuthService", "kind": "Class"},
+        {"id": "n-m1", "path": "svc.py", "qualname": "AuthService/authenticate",
+         "kind": "Function"},
+        {"id": "n-b1", "path": "svc.py", "qualname": "bootstrap", "kind": "Function"},
+    ]
+    base = {
+        "ok": True, "repo": "demo", "repos": ["demo"], "now": 1_787_000_000.0,
+        "counts": {"nodes": 4, "edges": 3, "plans": 1, "claims": 2},
+        "totals": {"nodes": 4, "edges": 3},
+        "truncated": {"nodes": False, "edges": False},
+        "index_age": {"indexed_at": None, "dirty_files": 0, "stale": False},
+        "nodes": nodes,
+        "edges": [{"src": "n-f1", "dst": "n-c1", "kind": "CONTAINS"},
+                  {"src": "n-c1", "dst": "n-m1", "kind": "CONTAINS"},
+                  {"src": "n-b1", "dst": "n-c1", "kind": "CALLS"}],
+        "plans": [{"id": "lm-x1", "agent": "aria", "title": "boot work",
+                   "created": "2026-08-19T10:00:00Z", "ttl_expires": 1_787_001_800.0}],
+        "claims": [
+            {"node_id": "n-b1", "plan_id": "lm-x1", "mode": "write", "origin": "target",
+             "agent": "aria"},
+            {"node_id": "n-c1", "plan_id": "lm-x1", "mode": "write", "origin": "expanded",
+             "agent": "aria"},
+        ],
+        "events": [{"ts": "2026-08-19T10:00:00Z", "actor": "aria", "action": "declared",
+                    "detail": "lm-x1"}],
+        "agents": ["aria"],
+    }
+    base.update(over)
+    return base
+
+
+@pytest.mark.skipif(shutil.which("node") is None,
+                    reason="node not on PATH — the dashboard JS harness cannot run")
+def test_dashboard_script_executes_over_real_payloads(tmp_path) -> None:
+    """BC3-6: string-matching the page source proves the MARKUP exists, not that the
+    script RUNS. Execute the page's own <script> under a stub DOM (tests/server/js/run.js)
+    over three payload shapes and pin what it renders — including the §11.40 expanded-claim
+    tooltip — and that rendering is deterministic."""
+    states = {
+        "normal": _mini_state(),
+        "empty": _mini_state(plans=[], claims=[], events=[], agents=[],
+                             counts={"nodes": 4, "edges": 3, "plans": 0, "claims": 0}),
+        "stale_truncated": _mini_state(
+            truncated={"nodes": True, "edges": True},
+            index_age={"indexed_at": 1_786_999_000.0, "dirty_files": 3, "stale": True}),
+    }
+    sp = tmp_path / "states.json"
+    sp.write_text(json.dumps(states), encoding="utf-8")
+    page = Path(_templates()) / "dashboard.html"
+    runjs = Path(__file__).parent / "js" / "run.js"
+    runs = [subprocess.run([shutil.which("node"), str(runjs), str(page), str(sp)],
+                           capture_output=True, text=True, timeout=60) for _ in range(2)]
+    for r in runs:
+        assert r.returncode == 0, r.stderr
+    out = runs[0].stdout
+    assert out == runs[1].stdout                       # rendering is deterministic
+    assert "write (expanded — this node only) · aria" in out   # §11.40 tooltip branch ran
+    assert "write · aria" in out                                # named claim stays plain
+    assert "##### empty" in out and "##### stale_truncated" in out

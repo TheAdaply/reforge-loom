@@ -1292,6 +1292,20 @@ spec-vs-args set-equality validation. IN and mandatory: hook fail-open exactly p
     the next run (U1). Callers must NOT wrap `index_repo` in `immediate()` (nested-BEGIN
     error); the CLI's whole-rebuild WARNING is retired with its trigger.
 
+46. **The wire-case enum gains `error`** (FINDINGS BC3-3; amends §6's six-case list
+    ADDITIVELY). The chaos-F2 fix answered a failed `gate_decision` with the advisory
+    allow REUSING `case: "unindexed"` — one signal meaning both "repo not indexed" and
+    "server failed to judge", the same ambiguity class §11.40 closed for claim origin.
+    The could-not-judge answer is now `{decision: "allow", case: "error", ...}` — same
+    200, same five keys, hook behavior unchanged (it branches on `decision` alone);
+    audit and incident reconstruction get the distinction. Also this cycle, two small
+    init hardenings: `loom init` refuses to append the CLAUDE.md snippet through a
+    symlink pointing OUTSIDE the repo (break3 J4e — writing through it would mutate a
+    file that is not this repo's; a within-repo symlink still works), and the dashboard
+    gained an EXECUTABLE test (BC3-6): `tests/server/js/run.js` runs the page's own
+    script under a stub DOM over real payload shapes, pinning the §11.40 tooltip and
+    render determinism (skipped where node is absent).
+
 ---
 
 ## 12. THIRD-PARTY NOTICES (frozen content for `THIRD_PARTY_NOTICES.md`)

@@ -423,7 +423,11 @@ def build_server(db_path: str, repos: dict[str, str], token: str = "") -> MCPSer
             # stderr line — it is the only one, since the audit trail is what just failed.
             sys.stderr.write(f"loom: WARNING — /gate could not judge repo {asked!r} "
                              f"({type(exc).__name__}: {exc}); answered advisory allow\n")
-            return JSONResponse(_ADVISORY)
+            # BC3-3 (§11.46): its own case, not "unindexed" — one wire signal meaning both
+            # "repo not indexed" and "server failed to judge" is the ambiguity class that
+            # cli-F1 closed for origin. Hook behavior is unchanged (it branches on
+            # `decision` alone); audit and incident reconstruction get the distinction.
+            return JSONResponse({**_ADVISORY, "case": "error"})
         return JSONResponse({k: d[k] for k in
                              ("decision", "case", "message", "node_id", "plan_id")})
 

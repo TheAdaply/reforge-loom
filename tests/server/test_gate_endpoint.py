@@ -228,5 +228,9 @@ def test_gate_answers_200_and_the_five_keys_when_the_decision_itself_fails(
     assert status == 200
     assert set(answer) == WIRE_KEYS                           # exactly five, no error key
     assert answer["decision"] == "allow"                      # advisory, never a hard deny
+    # BC3-3 (§11.46): its own case — "unindexed" meaning both "repo not indexed" and
+    # "server failed to judge" was the one-signal-two-meanings ambiguity cli-F1 closed
+    # for origin. The hook branches on `decision` alone, so behavior is unchanged.
+    assert answer["case"] == "error"
     # ...and the operator is told, since the audit trail is the thing that just failed.
     assert "WARNING" in capsys.readouterr().err
