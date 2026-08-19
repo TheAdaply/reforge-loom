@@ -1229,6 +1229,11 @@ spec-vs-args set-equality validation. IN and mandatory: hook fail-open exactly p
     one CALLS hop no longer buys downward ownership of a Class or File, while named targets
     keep full §4 downward authority and up∪down contention (council W2 preserved).
 
+39. **§9.1's `EXCLUDE_DIRS` listing is superseded** (council W5; FINDINGS BC3-5). `tests`,
+    `frontend` and `alembic` are INDEXED now — an ungated test tree was a silent coordination
+    hole. The excluded set is vendor/tooling only; `indexer/walk.py::EXCLUDE_DIRS` is the
+    authority, and `test_exclude_dirs_are_pruned` pins both directions.
+
 ---
 
 ## 12. THIRD-PARTY NOTICES (frozen content for `THIRD_PARTY_NOTICES.md`)

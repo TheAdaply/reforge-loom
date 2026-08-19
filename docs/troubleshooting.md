@@ -157,6 +157,11 @@ inside them is claimable**, by design and not yet configurable. `tests/` is *not
 
 Confirm with `loom ls` and by calling the `check` tool on the exact ref.
 
+A rarer cause on macOS after an upgrade: paths with accented characters. Databases indexed by a
+loom build older than the NFC path normalization hold decomposed (NFD) path keys, and NFC lookups
+miss them — every decision on those files is `allow/unindexed` until one full re-index. Run
+`loom index --repo NAME` once per served repo after upgrading; nothing else is needed.
+
 ### "The gate warns on every edit"
 
 The hook is failing open and saying so. It could not reach the server within 1.5 seconds, or the

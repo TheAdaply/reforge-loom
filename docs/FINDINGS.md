@@ -596,13 +596,13 @@ the design-needed remainders — no code for them landed in this cycle.
   six-case wire enum gains a seventh case.
 - **BC3-4 (low) — `loom init` writes through a symlinked CLAUDE.md (journey J4e)** to a target
   outside the repo. Refuse, or realpath-check, symlinked targets before appending the snippet.
-- **BC3-5 (docs) — BUILD-SPEC §9.1 still prints the pre-W5 `EXCLUDE_DIRS`.** Frozen text; needs a
-  §11 DECISIONS-DELTA entry. The two non-frozen copies of the same falsehood (README,
-  troubleshooting) were corrected this cycle.
+- **BC3-5 (docs) — BUILD-SPEC §9.1 still prints the pre-W5 `EXCLUDE_DIRS`. FIXED** by §11.39
+  (walk.py is the authority; tests/frontend/alembic indexed since W5). The two non-frozen copies
+  of the same falsehood (README, troubleshooting) were corrected the cycle before.
 - **BC3-6 (tests) — the dashboard has no executable test.** `test_dashboard.py` string-matches
   the page source only. A ~40-line stdlib-node harness that renders the page's own `<script>`
   over real `/state` payloads exists at `scratchpad/break3/simplify/js/` — worth landing the
   next time the fabric is touched.
-- **BC3-7 (ops note) — NFC re-index.** Databases indexed before the NFC path normalization hold
-  decomposed path keys; NFC lookups miss them until one full `loom index` (fix-ledger §11.34
-  residual).
+- **BC3-7 (ops note) — NFC re-index. FIXED**: troubleshooting.md "My edits are never blocked" now
+  carries the upgrade note (pre-NFC databases hold decomposed path keys; one `loom index --repo
+  NAME` per repo after upgrading; fix-ledger §11.34 residual).
