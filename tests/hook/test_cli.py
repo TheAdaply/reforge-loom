@@ -247,6 +247,25 @@ def test_release_is_owner_only_and_tombstones_claims(seeded_db, monkeypatch, cap
         run_cli(monkeypatch, "release", "lm-9c1x", "--agent", "aria", "--db", seeded_db)
 
 
+def test_ls_and_show_mark_expanded_claims(seeded_db, monkeypatch, capsys) -> None:
+    """break4 cli-F1, the display half: a CALLS-swept claim covers its node ONLY, so it
+    must LOOK different on every text surface — printed identically to a named claim, the
+    board answers the opposite of the gate one level down."""
+    conn = connect(seeded_db)
+    conn.execute("UPDATE claims SET origin='expanded' WHERE plan_id = 'lm-9c1x'")
+    conn.close()
+    for ambient in ("CLAUDE_CODE", "LOOM_AGENT_MODE"):
+        monkeypatch.delenv(ambient, raising=False)
+    run_cli(monkeypatch, "ls", "--db", seeded_db, "--json")
+    assert json.loads(capsys.readouterr().out)[0]["origin"] == "expanded"
+    run_cli(monkeypatch, "ls", "--db", seeded_db)
+    assert "write (expanded)\t" in capsys.readouterr().out
+    run_cli(monkeypatch, "show", "lm-9c1x", "--db", seeded_db)
+    assert "(expanded — this node only)" in capsys.readouterr().out
+    run_cli(monkeypatch, "show", "n-node0001", "--db", seeded_db)
+    assert ", expanded — this node only)" in capsys.readouterr().out
+
+
 def test_ls_hides_released_and_expired_claims(seeded_db, monkeypatch, capsys) -> None:
     conn = connect(seeded_db)
     conn.execute("UPDATE plans SET ttl_expires = ? WHERE id = 'lm-9c1x'", (now_s() - 10,))
