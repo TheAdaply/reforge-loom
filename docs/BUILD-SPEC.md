@@ -1217,6 +1217,18 @@ spec-vs-args set-equality validation. IN and mandatory: hook fail-open exactly p
     with the same `_die` its JSONDecodeError guard uses; both wrong shapes used to dump an
     `AttributeError` traceback from the middle of `loom init`.
 
+38. **BC3-1: a claim's origin bounds its authority** (amends §4 container authority and §5.3
+    expansion; FINDINGS BC3-1). `claims` gains `origin` — `'target'` for nodes the agent
+    NAMED, `'expanded'` for nodes swept in by the CALLS hop (guarded migration; pre-migration
+    rows read `'target'`, the generous-and-correct reading for dbs minted before origins were
+    recorded). An `'expanded'` claim authorizes and contends on its own node ONLY: `check_node`
+    accepts an ANCESTOR claim only when it is `origin='target'`, and `find_conflicts` skips
+    ancestor-only contention rows that are not — calling a class is not owning it. Naming a
+    previously-swept node (rescope) PROMOTES its claim to `'target'`; otherwise claims are
+    first-wins and never demoted (INSERT OR IGNORE). Closes the fuzz F1/F1b two-writers case:
+    one CALLS hop no longer buys downward ownership of a Class or File, while named targets
+    keep full §4 downward authority and up∪down contention (council W2 preserved).
+
 ---
 
 ## 12. THIRD-PARTY NOTICES (frozen content for `THIRD_PARTY_NOTICES.md`)

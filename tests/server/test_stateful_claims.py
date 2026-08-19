@@ -145,6 +145,7 @@ class ClaimLifecycle(RuleBasedStateMachine):
                                                  # by INDEX so the strategy shape never
                                                  # depends on minted (time-seeded) ids.
         self.expansion: set[tuple[str, str]] = set()   # (plan_id, node_id) claimed via CALLS hop
+        self.named: set[tuple[str, str]] = set()       # (plan_id, node_id) NAMED as a target
         self.log: list[str] = []
 
     @initialize()
@@ -190,11 +191,16 @@ class ClaimLifecycle(RuleBasedStateMachine):
         if pid not in self.plans:
             self.order.append(pid)
         self.plans[pid] = agent
+        # BC3-1 origin bookkeeping, mirroring the DB's first-wins INSERT OR IGNORE + rescope
+        # promotion: naming beats sweeping, in either order.
         members = {nid for ms in res.get("expanded_from", {}).values() for nid in ms}
+        named = set(res.get("claimed_write", ())) - members
+        self.named |= {(pid, nid) for nid in named}
+        for nid in named:
+            self.expansion.discard((pid, nid))    # naming a swept node promotes it
         for nid in members:
-            self.expansion.add((pid, nid))
-        for nid in set(res.get("claimed_write", ())) - members:
-            self.expansion.discard((pid, nid))    # BC3-1: naming a swept node promotes it
+            if (pid, nid) not in self.named:      # re-sweeping a named node demotes nothing
+                self.expansion.add((pid, nid))
 
     def _check_deny(self, d: dict) -> None:
         # I3 — a deny must name an active plan, or name none at all (`no_plan`).
@@ -343,8 +349,8 @@ def test_expansion_container_grants_no_downward_authority():
 
     Deliberately asserts ONLY the invariant, never that either declare is granted, so it
     passes under EITHER fix direction — deny the second declare, or stop letting an
-    expansion-acquired container claim confer downward authority at check time. `strict=True`
-    turns the fix into an XPASS failure that says "delete this marker".
+    expansion-acquired container claim confer downward authority at check time. BC3-1's
+    origin model took the second direction.
     """
     conn = build_conn()
     now = 1_000_000.0
@@ -361,3 +367,35 @@ def test_expansion_container_grants_no_downward_authority():
                                now=now)["decision"] == "allow"]
     conn.close()
     assert len(allowed) <= 1, f"{victim} is writable by {allowed} at the same time"
+
+
+def test_resweeping_a_named_node_never_demotes_it():
+    """BC3-1's first-wins tie-break, pinned deterministically.
+
+    declare(AuthService) sweeps bootstrap in over the CALLS hop; rescoping bootstrap in BY
+    NAME re-sweeps AuthService as an expansion member of bootstrap. INSERT OR IGNORE must
+    keep the stronger 'target' row — alice keeps downward authority over AuthService's
+    children — while bootstrap's own claim is promoted 'expanded' -> 'target'. The
+    Hypothesis machine's oracle mirrors exactly this rule (its `named` guard).
+    """
+    conn = build_conn()
+    now = 1_000_000.0
+    with immediate(conn):
+        r1 = C.declare_plan(conn, agent="alice", repo=REPO, branch="", title="t", spec_md=SPEC,
+                            write_targets=["svc.py::AuthService"], assumes=[], ttl_s=1800,
+                            now=now)
+    assert r1["ok"] and REF_TO_ID["svc.py::bootstrap"] in r1["claimed_write"]
+    with immediate(conn):
+        r2 = C.rescope(conn, plan_id=r1["plan_id"], add_targets=["svc.py::bootstrap"],
+                       add_assumes=[], now=now)
+    assert r2["ok"]
+    resweep = {n for ms in r2["expanded_from"].values() for n in ms}
+    assert REF_TO_ID["svc.py::AuthService"] in resweep    # the hop really is bidirectional
+    d = C.check_node(conn, repo=REPO, agent="alice",
+                     node_id=REF_TO_ID["svc.py::AuthService/Session"], now=now)
+    origins = {ref: conn.execute("SELECT origin FROM claims WHERE node_id=? AND mode='write'",
+                                 (REF_TO_ID[ref],)).fetchone()["origin"]
+               for ref in ("svc.py::AuthService", "svc.py::bootstrap")}
+    conn.close()
+    assert d["decision"] == "allow", "re-sweep demoted a NAMED container claim"
+    assert origins == {"svc.py::AuthService": "target", "svc.py::bootstrap": "target"}

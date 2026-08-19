@@ -421,6 +421,34 @@ def test_a_fresh_database_ships_the_repo_column(tmp_path) -> None:
     assert "repo" in cols
 
 
+def test_claims_origin_migration_is_idempotent_and_reads_old_rows_as_target(tmp_path) -> None:
+    """BC3-1: `ALTER TABLE claims ADD COLUMN origin` on a pre-migration database. Old rows
+    read 'target' — the generous reading is CORRECT for dbs minted before the CALLS hop
+    recorded how a claim was acquired, because demoting them would strip live authority."""
+    db = str(tmp_path / "old.sqlite3")
+    con = connect(db)
+    try:                                              # the OLD (pre-origin) claims table
+        con.execute("CREATE TABLE claims (node_id TEXT NOT NULL, plan_id TEXT NOT NULL, "
+                    "mode TEXT NOT NULL, created TEXT NOT NULL, released TEXT, "
+                    "PRIMARY KEY (node_id, plan_id, mode))")
+        con.execute("INSERT INTO claims VALUES ('n-old00001','lm-old1','write',"
+                    "'2020-01-01T00:00:00Z',NULL)")
+    finally:
+        con.close()
+
+    for _ in range(3):                                # idempotent: never a duplicate column
+        init_db(db)
+
+    con = connect(db)
+    try:
+        cols = [r["name"] for r in con.execute("PRAGMA table_info(claims)")]
+        assert cols.count("origin") == 1
+        row = con.execute("SELECT origin FROM claims WHERE plan_id='lm-old1'").fetchone()
+    finally:
+        con.close()
+    assert row["origin"] == "target"
+
+
 # --------------------------------------------------------------------------- §6 unit: tools
 
 
