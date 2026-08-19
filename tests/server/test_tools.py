@@ -95,8 +95,11 @@ def test_full_lifecycle_over_the_tool_surface(tmp_path) -> None:
     (plan2,) = run(mcp, [("get_plan", {"plan_id": pid})])
     assert LONELY in plan2["plan"]["write_claims"] and AUTH in plan2["plan"]["write_claims"]
 
-    (renewed,) = run(mcp, [("renew", {"plan_id": pid})])
+    (renewed,) = run(mcp, [("renew", {"plan_id": pid, "agent": "aria"})])
     assert renewed["renewed"] == 1 and renewed["expires_ts"] >= widened["expires_ts"]
+    # break3 chaos-F6: renew is owner-only, exactly like release two lines below.
+    (poached,) = run(mcp, [("renew", {"plan_id": pid, "agent": "bo"})])
+    assert poached == {"renewed": 0, "reason": "not_owner"}
 
     (bad,) = run(mcp, [("release", {"plan_id": pid, "agent": "bo"})])
     assert bad == {"ok": False, "reason": "not_owner"}
@@ -161,7 +164,7 @@ def test_errors_are_data_never_raised(tmp_path) -> None:
                           "write_targets": [USER], "repo": "other"}),
         ("list_claims", {"repo": "other"}),
         ("get_plan", {"plan_id": "lm-nope"}),
-        ("renew", {"plan_id": "lm-nope"}),
+        ("renew", {"plan_id": "lm-nope", "agent": "a"}),
         ("release", {"plan_id": "lm-nope", "agent": "a"}),
         ("rescope", {"plan_id": "lm-nope"}),
         ("declare_plan", {"agent": "a", "title": "t", "spec_md": "empty",

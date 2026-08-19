@@ -17,9 +17,11 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import NoReturn
 
 from loom import __version__
 from loom.server.db import connect, immediate, init_db, iso, now_s
@@ -38,6 +40,11 @@ HOOK_ENTRY = {"type": "command", "command": "", "args": [], "timeout": 5,
 # unscoped path set is denied HOOK-side (§7.2), so the check never depends on index state.
 VERIFY_PAYLOAD = {"tool_name": "mcp__loom__replace_in_files",
                   "tool_input": {"relative_path": "", "dry_run": False}}
+# `loom doctor`'s round-trip payload, which must reach the SERVER (break3 chaos-F3 — the
+# hook-side one above proved only that the binary runs). A `Write` to a path under the repo
+# root always gates; this name is never a real file, so the honest answer is `new_path` —
+# allow, silent, and impossible to get without a live `/gate` on the other end.
+_PROBE_REL = ".loom-doctor-probe.py"
 # The ONE agent-invisible place the escape hatch is documented (§7.4 no-override law).
 BYPASS_NOTE = ("Human escape hatch: LOOM_BYPASS=1 in your own shell makes the gate pass that\n"
                "process through. Every use is written to ~/.loom/gate-audit.jsonl. Agents are\n"
@@ -49,7 +56,14 @@ ACTIVE = "c.released IS NULL AND p.status = 'active' AND p.ttl_expires > ?"
 SNIPPET_MARKER = "<!-- loom protocol v1"
 
 
-def _die(msg: str, as_json: bool = False) -> None:
+def probe_payload(repo_root: str) -> dict:
+    """`loom doctor`'s check-8 stdin (break3 chaos-F3). Module-level so a test can pipe the
+    same bytes the verb does."""
+    return {"tool_name": "Write",
+            "tool_input": {"file_path": os.path.join(repo_root, _PROBE_REL), "content": ""}}
+
+
+def _die(msg: str, as_json: bool = False) -> NoReturn:
     sys.stderr.write((json.dumps({"ok": False, "error": msg}) if as_json else f"loom: {msg}") + "\n")
     raise SystemExit(1)
 
@@ -148,8 +162,24 @@ def _index(db: str, repo: str, repo_root: str, changed_only: bool | None) -> dic
         # The price is the write lock held for the parse (~150ms per 200 files); concurrent
         # declares queue on `busy_timeout` instead of racing, and WAL readers keep the
         # pre-index snapshot throughout. That is the trade worth making.
+        #
+        # On a BIG repo that price is seconds, and the gate is not only a reader: its audit
+        # row and its implicit renew are writes, so on a 6000-file tree the breaker measured
+        # a run of `/gate` calls timing out and FAILING OPEN across every repo on the server,
+        # with nothing anywhere saying why (break3 chaos-F1). Closing the window properly
+        # means chunking the rebuild or indexing into a shadow table and swapping — a design
+        # change, and backlog. Until then the operator at least gets told, on stderr, that
+        # this is the process holding the lock and roughly for how long it held it.
+        sys.stderr.write(
+            f"loom: WARNING — indexing '{repo}' takes the loom write lock for the whole "
+            "rebuild; while it is held, /gate calls that need to write can exceed the hook's "
+            "1.5s budget and fail OPEN (advisory, uncoordinated edits) on every repo this "
+            "database serves\n")
+        started = time.monotonic()
         with immediate(conn):
             stats = index_repo(conn, repo, repo_root, changed_only=changed_only)
+        sys.stderr.write(f"loom: index of '{repo}' released the write lock after "
+                         f"{time.monotonic() - started:.1f}s\n")
     finally:
         conn.close()
     return stats
@@ -212,25 +242,43 @@ def _pick_repo(server: str, asked: str | None, served: list[str]) -> str:
     if len(served) == 1:
         return served[0]
     _die(f"{server} serves several repos; pass --repo NAME with one of: {', '.join(served)}")
-    raise AssertionError                                   # pragma: no cover — _die exits
+
+
+def _read_json_object(path: str) -> dict:
+    """The READ half of `init`'s two read-modify-write files: `{}` when absent, a hard error
+    when present and unusable. `doctor`'s `_json_file` answers the same question the other
+    way round — it REPORTS a broken file as a failed row — because `init` is mid-way through
+    writing a checkout and must neither dump a traceback nor overwrite a human's file."""
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        try:
+            data = json.load(fh)
+        except json.JSONDecodeError:
+            _die(f"{path} is not valid JSON; fix it by hand — loom will not overwrite it")
+    if not isinstance(data, dict):
+        _die(f"{path} is not a JSON object; fix it by hand — loom will not overwrite it")
+    return data
 
 
 def _merge_settings(repo_root: str, gate: str) -> int:
     """READ-MODIFY-WRITE `.claude/settings.json`; idempotent on the loom command string (§7.5)."""
     path = os.path.join(repo_root, ".claude", "settings.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    data = {}
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as fh:
-            try:
-                data = json.load(fh)
-            except json.JSONDecodeError:
-                # `_json_file` already does this for doctor; init must not dump a traceback
-                # halfway through writing a checkout's files.
-                _die(f"{path} is not valid JSON; fix it by hand — loom will not overwrite it")
-        if not isinstance(data, dict):
-            _die(f"{path} is not a JSON object; fix it by hand — loom will not overwrite it")
-    groups, added = data.setdefault("hooks", {}).setdefault("PreToolUse", []), 0
+    data = _read_json_object(path)
+    # The same guard, one level down (break3 journey-J4c/J4d). A `hooks` that is an ARRAY
+    # (`'list' object has no attribute 'setdefault'`) or a `PreToolUse` that is an OBJECT
+    # (`'dict' object has no attribute 'append'`) is a hand-edited settings.json — Claude
+    # Code's own schema names both keys — and it used to dump an AttributeError traceback
+    # from the middle of `loom init`, after the config and before the hooks. Same style,
+    # same promise as the two guards above: say what is wrong, write nothing.
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        _die(f'{path} has a non-object "hooks"; fix it by hand — loom will not overwrite it')
+    groups, added = hooks.setdefault("PreToolUse", []), 0
+    if not isinstance(groups, list):
+        _die(f'{path} has a non-array "hooks.PreToolUse"; fix it by hand — loom will not '
+             "overwrite it")
     for matcher in MATCHERS:
         group = next((g for g in groups if isinstance(g, dict) and g.get("matcher") == matcher), None)
         if group is None:
@@ -268,17 +316,7 @@ def _merge_mcp_json(repo_root: str, server: str, token: str = "") -> bool:
     the gate denies them for not declaring, but a fresh session has no way to call
     the tool. Found by the post-MVP red-team pass; the hook enforces, this enables."""
     path = os.path.join(repo_root, ".mcp.json")
-    data = {}
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as fh:
-            try:
-                data = json.load(fh)
-            except json.JSONDecodeError:
-                # `_json_file` already does this for doctor; init must not dump a traceback
-                # halfway through writing a checkout's files.
-                _die(f"{path} is not valid JSON; fix it by hand — loom will not overwrite it")
-        if not isinstance(data, dict):
-            _die(f"{path} is not a JSON object; fix it by hand — loom will not overwrite it")
+    data = _read_json_object(path)
     servers = data.setdefault("mcpServers", {})
     entry = {"type": "http", "url": server.rstrip("/") + "/mcp"}
     if token:
@@ -444,6 +482,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     cfg_path = (os.environ.get("LOOM_CONFIG") or hook_gate._walk_up_config(start)
                 or os.path.expanduser("~/.loom/config.toml"))
     cfg = hook_gate.load_config(hook_gate.config_start_dir({"cwd": start}))
+    base = cfg["server_url"].rstrip("/") if cfg else ""     # every URL below is built on it
     row("config", cfg is not None,
         f"{cfg_path} (repo={cfg['repo']}, agent={cfg['agent']})" if cfg else
         f"no usable config at {cfg_path} — run `loom init --server URL` in this repo")
@@ -455,7 +494,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     detail = "skipped — no config to name a server"
     if cfg:
         try:
-            data = _get_json(cfg["server_url"].rstrip("/") + "/health", 3)
+            data = _get_json(base + "/health", 3)
             served = _served(data)
             mode = _auth_mode(data)
             detail = (f"{cfg['server_url']} serves: {', '.join(served) or '(nothing)'} "
@@ -473,7 +512,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     ok, detail = False, "skipped — no reachable server to ask"
     if cfg and served:
         try:
-            _get_json(cfg["server_url"].rstrip("/") + "/state", 3, cfg_token)
+            _get_json(base + "/state", 3, cfg_token)
             ok = True
             detail = ("shared token accepted" if cfg_token else
                       "server is open; no token configured")
@@ -509,24 +548,31 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 
     # 7 mcp registered
     mcp_path = _walk_up(start, ".mcp.json")
-    want = cfg["server_url"].rstrip("/") + "/mcp" if cfg else ""
+    want = base + "/mcp" if cfg else ""
     entry = (_json_file(mcp_path).get("mcpServers") or {}).get("loom") or {}
     url = str(entry.get("url") or "") if isinstance(entry, dict) else ""
     row("mcp registered", bool(want) and url == want, f"{mcp_path} -> {url}" if want and url == want
         else f"mcpServers.loom.url is {url or 'absent'} in "
              f"{mcp_path or '<no .mcp.json>'}, expected {want or '<no config>'}")
 
-    # 8 gate round-trip — the §7.5 payload is denied HOOK-side, so this proves the chain
-    # without depending on index or claim state (and stays honest with a dead server).
+    # 8 gate round-trip — the whole chain, SERVER INCLUDED (break3 chaos-F3). This row used
+    # to pipe the §7.5 VERIFY_PAYLOAD, which `locator.deny_local` refuses hook-side: it never
+    # reached `call_gate`, so it printed PASS with the server dead or `/gate` answering 500 —
+    # a green table over the one failure the operator most needs to see. `PROBE_PAYLOAD`
+    # names a path under this repo root instead, which the gate must ask the server about.
+    # The verdict is deliberately not a decision: any answer at all means the chain works
+    # (a never-written path answers `new_path`, an unindexed repo `unindexed` — both allow,
+    # both silent). A fail-open, a bypass or a deny all write to stderr, and that is the FAIL.
     ok, detail = False, "skipped — needs a config and `loom-gate` on PATH"
     if cfg and gate_bin:
         try:
-            proc = subprocess.run([gate_bin], input=json.dumps(VERIFY_PAYLOAD), text=True,
-                                  capture_output=True, timeout=20,
+            proc = subprocess.run([gate_bin], input=json.dumps(probe_payload(cfg["repo_root"])),
+                                  text=True, capture_output=True, timeout=20,
                                   env={**os.environ, "LOOM_CONFIG": cfg_path})
-            ok = proc.returncode == 2
-            detail = ("exit 2 (deny) from the real gate" if ok else
-                      f"expected exit 2, got {proc.returncode}: {proc.stderr.strip()[-120:]}")
+            noise = proc.stderr.strip()
+            ok = proc.returncode == 0 and not noise
+            detail = ("the real gate reached the server and it answered" if ok else
+                      f"exit {proc.returncode}: {noise[-120:] or 'no diagnostic'}")
         except Exception as exc:
             detail = f"could not run {gate_bin} ({type(exc).__name__})"
     row("gate round-trip", ok, detail)
@@ -534,12 +580,16 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     # 9 index freshness / 10 index staleness — both WARN, never FAIL: an unindexed or a
     # behind repo gates less than it should, but each is a one-command fix and neither is a
     # reason to fail a CI-style check. One `/state` fetch answers both rows.
+    # break3 chaos-F7: this row printed FAIL whenever it could not ask — no server, or an
+    # unserved repo — contradicting its own "both WARN, never FAIL" contract two lines up
+    # and §4.8. It never fired alone, so no exit code ever turned on it; it was still the
+    # table telling an operator the graph is broken when the truth is "the row above already
+    # said the server is down". Cannot-tell is a WARN, exactly like behind-the-tree.
     state: dict = {}
-    ok, warn, detail = False, False, "skipped — server or repo unknown"
+    ok, warn, detail = False, True, "cannot tell — server or repo unknown; see the rows above"
     if cfg and repo in served and served:
         try:
-            state = _get_json(f"{cfg['server_url'].rstrip('/')}/state?repo="
-                              f"{urllib.parse.quote(repo)}", 3, cfg_token)
+            state = _get_json(f"{base}/state?repo={urllib.parse.quote(repo)}", 3, cfg_token)
             nodes = int((state.get("counts") or {}).get("nodes") or 0)
             ok, warn = nodes > 0, nodes == 0
             detail = (f"{nodes} node(s) indexed for '{repo}'" if nodes else

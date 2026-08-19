@@ -18,8 +18,13 @@ FULL refs — a bare `"AuthService"` would mint the id of a nonexistent FILE nod
 
 from __future__ import annotations
 
+import socket
 import sqlite3
+import subprocess
+import sys
+import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 
 import pytest
 
@@ -120,3 +125,55 @@ def gconn(graph_db: str) -> Iterator[sqlite3.Connection]:
         yield c
     finally:
         c.close()
+
+
+# --------------------------------------------------------------- the subprocess-server rig
+#
+# ONE copy of the boot/teardown dance for the five `tests/server` files that need a REAL
+# server (specgate §2.6: `python -m loom.server.app`, PIPE logs, try/finally terminate).
+# Each of those files keeps its own thin fixture, because the five rigs genuinely differ in
+# what they BOOT — tokened, two-root, half-indexed, pre-seeded — and in nothing else. The
+# duplicated halves were `free_port`, the readiness poll and the terminate/kill teardown,
+# in four, five and five copies respectively; those live here now and nowhere else.
+
+
+def free_port() -> int:
+    """An ephemeral port, released before the server binds it."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+def wait_for_port(port: int, proc: subprocess.Popen, timeout: float = 20.0) -> None:
+    """Poll until the server accepts connections; a server that DIED reports its own stderr
+    rather than timing out silently."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:                              # pragma: no cover
+            raise RuntimeError(f"server died: {proc.communicate()[1]}")
+        try:
+            socket.create_connection(("127.0.0.1", port), 0.25).close()
+            return
+        except OSError:
+            time.sleep(0.05)
+    raise TimeoutError(f"server did not open port {port}")       # pragma: no cover
+
+
+@contextmanager
+def server_process(*args: str) -> Iterator[tuple[int, subprocess.Popen]]:
+    """A live `loom.server.app` subprocess on a fresh port; `args` are the caller's own boot
+    flags (`--repo-root`, `--db`, `--token`, ...). Yields `(port, proc)` — the Popen is part
+    of the contract: `test_doctor` kills the server mid-test to exercise its FAIL rows."""
+    port = free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "loom.server.app", "--host", "127.0.0.1", "--port", str(port),
+         *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        wait_for_port(port, proc)
+        yield port, proc
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:                        # pragma: no cover
+            proc.kill()

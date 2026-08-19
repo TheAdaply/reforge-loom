@@ -58,7 +58,11 @@ def _rel(raw, repo_root: str) -> str | None:
     # Canonicalize both sides so one file has one identity: `realpath` resolves symlinked
     # repo roots (a symlink-spelled repo must gate identically) and collapses `..`, so the
     # wire path is always the indexed spelling and a file truly outside the repo PASSes.
-    path, root = os.path.realpath(path), os.path.realpath(root).rstrip("/")
+    # `realpath` returns the caller's OWN unicode spelling of each component, so re-run
+    # `norm_path` over its output: that is where NFC is applied (see `naming.norm_path`),
+    # and it must cover the root too, or an NFD-spelled repo_root and an NFC-spelled payload
+    # fail the prefix test and the edit PASSes unchecked (break3 journey-J1).
+    path, root = norm_path(os.path.realpath(path)), norm_path(os.path.realpath(root)).rstrip("/")
     return path[len(root) + 1 :] if path.startswith(root + "/") else None
 
 

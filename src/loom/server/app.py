@@ -24,6 +24,7 @@ import argparse
 import hmac
 import os
 import sqlite3
+import sys
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -53,6 +54,13 @@ STATE_EDGE_CAP = 1500
 # deliberately absent (it is how a client LEARNS a token is required) and so is `/`, which
 # serves a static shell and no repo data.
 PROTECTED_PATHS = ("/gate", "/state", "/mcp")
+
+# The §6 answer for a request this server cannot judge — an unserved repo salt, an
+# unparseable body, or (break3 chaos-F2) a storage failure under the decision. One literal,
+# because "always HTTP 200, always exactly these five keys" is a promise with three callers
+# and no second spelling of it should exist.
+_ADVISORY = {"decision": "allow", "case": "unindexed", "message": "",
+             "node_id": None, "plan_id": None}
 
 # U2 — how long one repo's mtime scan is reused. A module constant for the same reason the
 # caps above are: a test lowers it with one `monkeypatch.setattr`. Staleness is a HINT, so
@@ -396,15 +404,26 @@ def build_server(db_path: str, repos: dict[str, str], token: str = "") -> MCPSer
             body = {}
         asked = str(body.get("repo") or "")
         if asked not in repos:
-            return JSONResponse({"decision": "allow", "case": "unindexed", "message": "",
-                                 "node_id": None, "plan_id": None})
+            return JSONResponse(_ADVISORY)
         q = body.get("qualname")
-        d = gate_decision(conn(), repo=asked, agent=str(body.get("agent") or ""),
-                          path=str(body.get("path") or ""),
-                          # P2-3: a non-string qualname reaches `prefix_candidates` and
-                          # explodes. Anything that is not a string is "no symbol named".
-                          qualname=q if isinstance(q, str) else None,
-                          now=now_s())
+        try:
+            d = gate_decision(conn(), repo=asked, agent=str(body.get("agent") or ""),
+                              path=str(body.get("path") or ""),
+                              # P2-3: a non-string qualname reaches `prefix_candidates` and
+                              # explodes. Anything that is not a string is "no symbol named".
+                              qualname=q if isinstance(q, str) else None,
+                              now=now_s())
+        except Exception as exc:
+            # break3 chaos-F2: on a FULL DISK the audit INSERT inside `gate_decision` raises
+            # `sqlite3.OperationalError: database or disk is full`, the route 500'd, and every
+            # hook in the fleet failed open — while `/health` still answered `{"ok": true}`.
+            # The parse guard above already decided what an unanswerable request gets: the
+            # advisory allow, HTTP 200, the five frozen keys. A judgement we cannot make is
+            # not a deny, and it is certainly not a traceback. The operator signal is this
+            # stderr line — it is the only one, since the audit trail is what just failed.
+            sys.stderr.write(f"loom: WARNING — /gate could not judge repo {asked!r} "
+                             f"({type(exc).__name__}: {exc}); answered advisory allow\n")
+            return JSONResponse(_ADVISORY)
         return JSONResponse({k: d[k] for k in
                              ("decision", "case", "message", "node_id", "plan_id")})
 

@@ -19,7 +19,6 @@ import json
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import time
@@ -27,6 +26,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from conftest import server_process
 
 from loom.cli.main import main as cli_main
 from loom.indexer.walk import index_repo
@@ -41,15 +41,6 @@ ROW = re.compile(r"^\s+(PASS|FAIL|WARN)\s\s(.+?)\s\s+(.*)$")
 
 
 # --------------------------------------------------------------------------- rig
-
-
-def free_port() -> int:
-    s = socket.socket()
-    try:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-    finally:
-        s.close()
 
 
 def alpha_root(tmp_path) -> Path:
@@ -69,30 +60,11 @@ def doctor_server(tmp_path) -> Iterator[tuple[str, subprocess.Popen]]:
         index_repo(conn, "alpha", str(root), changed_only=False)
     finally:
         conn.close()
-    port = free_port()
     # `python -m loom.server.app`, not `loom serve`: serve indexes every root at boot,
     # which would quietly index `beta` and take the freshness WARN away.
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "loom.server.app", "--repo-root", f"alpha={root}",
-         "--repo-root", f"beta={PYREPO2}", "--db", db, "--host", "127.0.0.1",
-         "--port", str(port)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    try:
-        deadline = time.monotonic() + 20
-        while time.monotonic() < deadline:
-            if proc.poll() is not None:                          # pragma: no cover
-                raise RuntimeError(f"server died: {proc.communicate()[1]}")
-            try:
-                socket.create_connection(("127.0.0.1", port), 0.25).close()
-                break
-            except OSError:
-                time.sleep(0.05)
+    with server_process("--repo-root", f"alpha={root}", "--repo-root", f"beta={PYREPO2}",
+                        "--db", db) as (port, proc):
         yield f"http://127.0.0.1:{port}", proc
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:                        # pragma: no cover
-            proc.kill()
 
 
 def run_cli(monkeypatch: pytest.MonkeyPatch, *argv: str) -> None:
@@ -151,7 +123,8 @@ def test_doctor_passes_every_check_on_a_wired_checkout(
     assert "auth=open" in rows["server"][1]          # D11: the mode, on the server row
     assert rows["auth"] == ("PASS", "server is open; no token configured")
     assert "loom-gate" in rows["gate binary"][1]
-    assert "exit 2" in rows["gate round-trip"][1]    # the real chain, not a stub
+    # break3 chaos-F3: the row now proves the WHOLE chain — the real binary AND the server.
+    assert rows["gate round-trip"] == ("PASS", "the real gate reached the server and it answered")
     assert re.match(r"\d+ node\(s\) indexed for 'alpha'", rows["index freshness"][1])
     assert rows["index staleness"] == ("PASS", "index matches the working tree")
 
@@ -208,14 +181,20 @@ def test_doctor_fails_on_a_dead_server(doctor_server, tmp_path, monkeypatch, cap
     rows, code, err = doctor(monkeypatch, capsys, root)
 
     assert code == 1 and "check(s) failed" in err
-    assert [rows[c][0] for c in ("server", "auth", "repo match",
-                                 "index freshness")] == ["FAIL"] * 4
+    assert [rows[c][0] for c in ("server", "auth", "repo match")] == ["FAIL"] * 3
     assert "unreachable" in rows["server"][1] and "loom serve" in rows["server"][1]
     # ...and the LOCAL half of the chain is still green, so the operator knows where to look.
     assert [rows[c][0] for c in ("config", "gate binary", "hook registered",
                                  "mcp registered")] == ["PASS"] * 4
-    # The §7.5 payload is denied hook-side, so the round trip stays honest with no server.
-    assert rows["gate round-trip"] == ("PASS", "exit 2 (deny) from the real gate")
+    # break3 chaos-F3: the round-trip row used to print PASS against a DEAD server — the
+    # §7.5 payload it piped is refused hook-side by `locator.deny_local`, so it exited 2
+    # without ever calling `/gate`. A row that cannot go red is not a check.
+    assert rows["gate round-trip"][0] == "FAIL"
+    assert "failed open" in rows["gate round-trip"][1]
+    # break3 chaos-F7: "both WARN, never FAIL" — a row that cannot ask is not a verdict.
+    # (Staleness stays PASS on purpose: absent evidence is not evidence of staleness.)
+    assert rows["index freshness"] == ("WARN", "cannot tell — server or repo unknown; "
+                                               "see the rows above")
 
 
 def test_doctor_fails_when_the_hook_is_not_registered(

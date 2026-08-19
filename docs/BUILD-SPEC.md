@@ -1167,6 +1167,56 @@ spec-vs-args set-equality validation. IN and mandatory: hook fail-open exactly p
     intact: no code is included, so no license is relied on, so no notice obligation exists for
     them. Nothing was deleted.
 
+32. **`TTL_FLOOR_S` gets its twin: `TTL_CEIL_S = 86_400`** (§5.3, §7.4 constants; FINDINGS I30).
+    `declare_plan` clamped `ttl_s` UP only, so `ttl_s=2**31` minted a 68-year claim — no
+    non-owner may release it and no sweep reaches it, i.e. a hard lock in a system whose README
+    says it has none. Larger values overflowed `iso()` and RAISED `OSError` / `ValueError` /
+    `OverflowError` out of a tool surface that promises errors as data. Now
+    `min(TTL_CEIL_S, max(TTL_FLOOR_S, ttl_s or CLAIM_TTL_S))`, clamped silently like the floor
+    and named in the `declared` event detail. Implicit renew, `renew` and `rescope` all extend
+    to `now + CLAIM_TTL_S`, which is inside the band by construction.
+
+33. **§5.8 `renew` takes an agent and is OWNER-ONLY: `renew(plan_id: str, agent: str)`.** The
+    check is `release`'s, verbatim, and was simply absent. Every deny message hands the blocked
+    agent an `owner_plan_id` (§7.4), so the agent a claim is blocking could extend that claim
+    indefinitely, one call at a time. New refusal `{"renewed": 0, "reason": "not_owner"}`;
+    `claims.renew(conn, plan_id, agent, now)` mirrors `claims.release`'s argument order.
+
+34. **Path identity includes UNICODE FORM: `norm_path` NFC-normalizes** (§4; completes P0-1's
+    "one file, one identity"). `café.py` has two byte spellings — decomposed (`cafe` + U+0301,
+    what a macOS zip or Finder copy leaves on disk) and composed (U+00E9, what a keyboard, a
+    fresh clone and every LLM emit). APFS opens both as ONE file; loom compared strings, so the
+    indexer keyed the graph on whichever it walked and a gate call in the other spelling
+    resolved nothing -> `new_path` -> ALLOW over a live foreign write claim, and the edit
+    landed. One form on both sides: `indexer.naming.norm_path` (which keys the graph) and
+    `hook.locator._rel` (which produces the wire path, over `realpath`'s output AND over
+    `repo_root`, or the prefix test itself splits). NOTE: a database indexed before this change
+    holds decomposed keys and needs one `loom index --full`.
+
+35. **`POST /gate` answers its own contract when the DECISION fails, not only the parse**
+    (extends 30). On a full disk the audit INSERT inside `gate_decision` raises
+    `sqlite3.OperationalError: database or disk is full`, so the route 500'd and every hook in
+    the fleet failed open — while `/health` still answered `{"ok": true}`. `gate_route` now
+    wraps the decision in the same guard the parse has and returns the same advisory allow. The
+    five frozen wire keys and the six documented cases are unchanged; the operator signal is a
+    stderr line, because the audit trail is precisely what has failed.
+
+36. **Two honesty fixes in `loom doctor`** (MULTIREPO-SPEC §4). Check 8 "gate round-trip" piped
+    the §7.5 `VERIFY_PAYLOAD`, which `locator.deny_local` refuses HOOK-side — it never reached
+    `call_gate`, so the row printed PASS with the server dead, `/gate` 500ing, or the token
+    stale. It now pipes a `Write` to a never-written path under the repo root, which must reach
+    the server, and PASSes only on exit 0 with a silent stderr (a fail-open, a bypass and a deny
+    all write there). Check 9 "index freshness" printed FAIL when it could not ask at all,
+    contradicting its own documented WARN-only status; cannot-tell is now a WARN.
+
+37. **Two smaller records with the same shape.** `hook.gate.fail_open` stamps the audit record
+    `decision: "fail_open"`, `case: "fail_open"`, `reason: <cause>` instead of falling through
+    to `main`'s `setdefault("decision", "allow")` — `~/.loom/gate-audit.jsonl` is what an
+    incident is reconstructed from and could not tell an OFF gate from a checked edit.
+    `cli._merge_settings` guards the SHAPE of `hooks` (object) and `hooks.PreToolUse` (array)
+    with the same `_die` its JSONDecodeError guard uses; both wrong shapes used to dump an
+    `AttributeError` traceback from the middle of `loom init`.
+
 ---
 
 ## 12. THIRD-PARTY NOTICES (frozen content for `THIRD_PARTY_NOTICES.md`)

@@ -154,13 +154,15 @@ deny message named. `{"ok": false, "reason": "unknown_plan"}` if there is no suc
 Every active claim in the repository with its owner, plan, mode and expiry. Runs a TTL sweep first,
 so the answer is current.
 
-### `renew(plan_id) -> {renewed, ...}`
+### `renew(plan_id, agent) -> {renewed, ...}`
 
-Extend an active plan's TTL to `max(current, now + 1800s)`.
+Extend **your own** active plan's TTL to `max(current, now + 1800s)`. Owner-only, exactly like
+`release`: you may not extend a plan you do not own, including the one a deny message just named
+as blocking you.
 
 ```json
 {"renewed": 1, "expires_ts": 1770000000.0, "expires_iso": "..."}
-{"renewed": 0, "reason": "expired"}          // also: "released", "unknown_plan"
+{"renewed": 0, "reason": "expired"}          // also: "released", "unknown_plan", "not_owner"
 ```
 
 `renewed: 0` is a verdict, not a warning. Declare again; do not keep editing.
@@ -180,7 +182,9 @@ Owner-only. Frees every claim the plan holds and closes it.
 
 ## The TTL law
 
-- A claim's default lifetime is **1800 seconds**. `ttl_s` below the 60-second floor is clamped up.
+- A claim's default lifetime is **1800 seconds**. `ttl_s` below the 60-second floor is clamped
+  up, and above the 86400-second (24 h) ceiling is clamped down. There is no unbounded lease:
+  claims are advisory and a crashed agent must never freeze the team.
 - Any successful `check`, gate decision or `rescope` on a plan renews it implicitly to
   `max(current, now + 1800s)`.
 - **An expired plan is never renewed.** Once past its deadline it is gone; declare a new one.

@@ -24,6 +24,15 @@ from loom.server.ids import mint_plan_id, node_ref, split_ref
 
 CLAIM_TTL_S = 1800
 TTL_FLOOR_S = 60
+# The floor's missing twin (FINDINGS I30). Without a ceiling `ttl_s` is unbounded, so
+# `declare_plan(ttl_s=2**31)` mints a 68-year claim that no non-owner can release and no
+# sweep can reach — a HARD LOCK, which the README says loom does not have ("advisory with
+# TTL, never hard locks"; "a crashed agent never freezes the team"). Larger values than this
+# also overflow `iso()` (`declare_plan` used to RAISE OSError/ValueError/OverflowError out
+# of a tool that promises errors as data). 24h: longer than any plausible single session,
+# short enough that the worst case is one day of stale advice, and a team that genuinely
+# wants more re-declares. Clamped SILENTLY like the floor, and named in the event detail.
+TTL_CEIL_S = 86_400
 SWEEP_GRACE_S = 3600
 MAX_DENY_CHARS = 9000
 CLOSURE_MAX_NODES = 5000     # bound on one CONTAINS walk (§4 hierarchy); a pathological
@@ -379,7 +388,7 @@ def declare_plan(conn: sqlite3.Connection, *, agent: str, repo: str, branch: str
         conn, repo, agent, write_targets, assumes, now, validate_spec(spec_md), "declare")
     if refusal:
         return refusal
-    ttl = max(TTL_FLOOR_S, ttl_s or CLAIM_TTL_S)
+    ttl = min(TTL_CEIL_S, max(TTL_FLOOR_S, ttl_s or CLAIM_TTL_S))
     expires = now + ttl
     plan_id = mint_plan_id(conn, title, spec_md, agent, time.time_ns())
     conn.execute(
@@ -388,7 +397,8 @@ def declare_plan(conn: sqlite3.Connection, *, agent: str, repo: str, branch: str
         (plan_id, agent, repo, branch, title, spec_md, iso(now), iso(now), expires))
     _insert_claims(conn, plan_id, write_set, "write", now)
     _insert_claims(conn, plan_id, read_set, "read", now)
-    detail = plan_id + (f" ttl clamped to {TTL_FLOOR_S}s" if ttl_s and ttl_s < TTL_FLOOR_S else "")
+    detail = plan_id + (f" ttl clamped to {TTL_FLOOR_S}s" if ttl_s and ttl_s < TTL_FLOOR_S
+                        else f" ttl clamped to {TTL_CEIL_S}s" if ttl_s > TTL_CEIL_S else "")
     log_event(conn, agent, "declared", detail, repo)
     return _granted(plan_id, expires, write_set, read_set, expanded, warnings)
 
@@ -417,12 +427,20 @@ def rescope(conn: sqlite3.Connection, *, plan_id: str, add_targets: list[str],
     return _granted(plan_id, expires, write_set, read_set, expanded, warnings)
 
 
-def renew(conn: sqlite3.Connection, plan_id: str, now: float) -> dict[str, Any]:
-    """§5.8 — never shortens; an expired or non-active plan cannot be renewed."""
+def renew(conn: sqlite3.Connection, plan_id: str, agent: str, now: float) -> dict[str, Any]:
+    """§5.8 — owner-only; never shortens; an expired or non-active plan cannot be renewed.
+
+    The owner check mirrors `release`'s and was simply missing (break3 chaos-F6). Every deny
+    message hands the blocked agent an `owner_plan_id` (§7.4), so without it the agent a
+    claim is blocking could extend that claim — indefinitely, one call at a time. A plan's
+    lifetime must only ever be extended by the agent doing the work it describes.
+    """
     p = conn.execute("SELECT agent, repo, status, ttl_expires FROM plans WHERE id=?",
                      (plan_id,)).fetchone()
     if not p:
         return {"renewed": 0, "reason": "unknown_plan"}
+    if p["agent"] != agent:
+        return {"renewed": 0, "reason": "not_owner"}
     if p["status"] in ("done", "superseded"):
         return {"renewed": 0, "reason": "released"}
     if p["status"] != "active" or p["ttl_expires"] <= now:

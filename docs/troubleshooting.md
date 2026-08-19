@@ -104,15 +104,18 @@ new `--server`.
 ### 8. `gate round-trip` — does the whole chain actually work
 
 ```
-FAIL  gate round-trip  expected exit 2, got 0: ...
+FAIL  gate round-trip  exit 0: loom: WARNING — gate failed open (URLError); coordination degraded
 ```
 
-This runs the real `loom-gate` binary on a synthetic payload that must be denied hook-side, so a
-PASS here means config discovery, the hook binary, the server, auth and the claim decision all just
-worked end to end. It is the row that proves the others were not lying.
+This runs the real `loom-gate` binary on a synthetic edit to a path under your repo root, which
+the hook has to ask the server about. A PASS means config discovery, the hook binary, the server,
+auth and the decision all just worked end to end — it is the row that proves the others were not
+lying. Anything less than a clean answer prints its own reason here: a fail-open (server down,
+401, `/gate` erroring), a `LOOM_BYPASS` still exported in your shell, or a deny.
 
-**Fix:** whatever rows 1–7 said. If they are all green and this is red, the hook binary on PATH is
-from a different loom checkout than the one you are running.
+**Fix:** whatever rows 1–7 said. If they are all green and this is red, check `LOOM_BYPASS` in
+your environment, then whether the hook binary on PATH is from a different loom checkout than the
+one you are running.
 
 ### 9. `index freshness` — does this repository have a graph at all (WARN)
 
@@ -120,7 +123,9 @@ from a different loom checkout than the one you are running.
 WARN  index freshness  'api' has no indexed nodes — run `loom index --repo api --repo-root PATH`
 ```
 
-An unindexed repository gates nothing: every edit resolves to `unindexed` and is allowed.
+An unindexed repository gates nothing: every edit resolves to `unindexed` and is allowed. The
+same row WARNs with `cannot tell — server or repo unknown` when there is no server to ask: this
+check never FAILs, and the row that explains the outage is one of the ones above it.
 
 **Fix:** `loom index --repo api --repo-root /path/to/checkout --db <the server's db>`. Note that
 this writes to the database, so it must run on the machine that has it, with the same `--db` the
@@ -146,9 +151,9 @@ server is older than this feature or unreachable, not that the index is stale.
 
 Most often row 4: the repository name in your config is not one the server serves, so every
 decision is `allow/unindexed`. Second most often row 9 or 10: the symbol you are editing is not in
-the graph. Third: the file is in a skipped directory — the indexer never walks `tests/`,
-`frontend/`, `alembic/`, `build/`, `dist/`, `node_modules/`, `.venv/` or `.git/`, so **symbols
-under `tests/` are not claimable**, by design and not yet configurable.
+the graph. Third: the file is in a skipped directory — the indexer never walks `build/`, `dist/`,
+`node_modules/`, `site-packages/`, `.venv/`, `venv/`, `__pycache__/` or `.git/`, so **nothing
+inside them is claimable**, by design and not yet configurable. `tests/` is *not* skipped.
 
 Confirm with `loom ls` and by calling the `check` tool on the exact ref.
 

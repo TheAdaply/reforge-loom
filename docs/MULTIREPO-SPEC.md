@@ -100,6 +100,18 @@ build_server/serve signature repos-dict. D4 register() served-list. D5 /state re
 repos[]. D6 new CLI forms + doctor. No changes to: §7.4 templates, /gate wire keys, ids/qualname
 rules, hook contract, claim semantics.
 
+**Delta on §4 above (the code is right, this document is the record).** The shipped table has
+TEN rows — §4's list predates the auth row (ITERATION-2 D11) and the index-staleness row (U2).
+Two of its rows also no longer behave as written, and BUILD-SPEC §11.36 carries the reasoning:
+
+- **gate round-trip** does NOT pipe the §7.5 `VERIFY_PAYLOAD` and does not expect exit 2. That
+  payload is refused HOOK-side by `locator.deny_local`, so the row printed PASS against a dead
+  server, a 500ing `/gate` and a stale token alike — it proved only that the binary runs. It now
+  pipes a `Write` to a never-written path under the repo root, which must reach `/gate`, and
+  PASSes on exit 0 with a silent stderr. (`loom init`'s own post-write verification keeps the
+  §7.5 payload and its exit-2 expectation: there the point IS the hook-side deny.)
+- **index freshness** WARNs, never FAILs — including when there is no server to ask.
+
 ## 8. Out of scope (this iteration)
 
 Cross-repo edges/claims; per-repo auth; org tenancy above repo; dashboard multi-repo aggregate

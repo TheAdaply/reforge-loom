@@ -45,17 +45,12 @@ from loom.indexer.queries.python import LANGUAGE, Q_DEFS, Resolver, matches
 from loom.server.db import iso, log_event, now_s
 from loom.server.ids import node_id
 
-# Directories never walked. Two groups, deliberately in one frozen set (BUILD-SPEC §9.1):
-#   never source     .git .venv venv node_modules site-packages build dist __pycache__
-#   convention skips frontend alembic tests — non-Python or generated in the layouts loom
-#                    targets. CONSEQUENCE: symbols under `tests/` get no nodes, so they are
-#                    not claimable and every edit there answers `new_path`/allow. Stated in
-#                    the README's MVP limits and in docs/troubleshooting.md. Not yet
-#                    configurable; making it so is a behavior change that needs its own
-#                    DECISIONS-DELTA entry.
-# Tooling/vendor dirs only. `tests/` is deliberately NOT here (council W5): agents spend
-# real edit budget in test trees, and an ungated directory is a silent coordination hole —
-# loom gates everything it indexes, and it indexes everything that is plausibly source.
+# Directories never walked (BUILD-SPEC §9.1): tooling and vendor trees ONLY. The frozen set
+# also carried `frontend`, `alembic` and `tests`; council W5 removed all three, because agents
+# spend real edit budget in a test tree and an unindexed directory is a silent coordination
+# hole — loom gates everything it indexes, and it indexes everything that is plausibly source.
+# Still not configurable: a `--exclude` flag is a behavior change needing its own
+# DECISIONS-DELTA entry (FINDINGS V10).
 EXCLUDE_DIRS = {
     ".git", ".venv", "venv", "node_modules", "site-packages", "build", "dist", "__pycache__",
 }

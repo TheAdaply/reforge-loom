@@ -239,12 +239,14 @@ def test_renew_never_shortens_and_refuses_an_expired_plan(gconn: sqlite3.Connect
     far = now_s() + 99999
     _age(gconn, a["plan_id"], far)
     with immediate(gconn):
-        assert claims.renew(gconn, a["plan_id"], now_s())["expires_ts"] == far
+        assert claims.renew(gconn, a["plan_id"], "aria", now_s())["expires_ts"] == far
     _age(gconn, a["plan_id"], now_s() - 1)
     with immediate(gconn):
-        assert claims.renew(gconn, a["plan_id"], now_s()) == {"renewed": 0, "reason": "expired"}
+        assert claims.renew(gconn, a["plan_id"], "aria", now_s()) == {"renewed": 0,
+                                                                      "reason": "expired"}
     with immediate(gconn):
-        assert claims.renew(gconn, "lm-nope", now_s()) == {"renewed": 0, "reason": "unknown_plan"}
+        assert claims.renew(gconn, "lm-nope", "aria", now_s()) == {"renewed": 0,
+                                                                   "reason": "unknown_plan"}
 
 
 def test_renew_after_release_reports_released(gconn: sqlite3.Connection) -> None:
@@ -252,7 +254,28 @@ def test_renew_after_release_reports_released(gconn: sqlite3.Connection) -> None
     with immediate(gconn):
         claims.release(gconn, a["plan_id"], "aria", "done", now_s())
     with immediate(gconn):
-        assert claims.renew(gconn, a["plan_id"], now_s()) == {"renewed": 0, "reason": "released"}
+        assert claims.renew(gconn, a["plan_id"], "aria", now_s()) == {"renewed": 0,
+                                                                     "reason": "released"}
+
+
+def test_renew_is_owner_only(gconn: sqlite3.Connection) -> None:
+    """break3 chaos-F6: `renew` took no agent, so anyone could extend anyone's claim.
+
+    The deny message a blocked agent receives NAMES `owner_plan_id` (§7.4), so bo learns the
+    id of the very plan blocking him — and could keep pushing its expiry out forever. The
+    owner check is `release`'s, verbatim.
+    """
+    a = declare(gconn, "aria", [USER])
+    before = gconn.execute("SELECT ttl_expires FROM plans WHERE id=?",
+                           (a["plan_id"],)).fetchone()[0]
+    with immediate(gconn):
+        assert claims.renew(gconn, a["plan_id"], "bo", now_s()) == {"renewed": 0,
+                                                                    "reason": "not_owner"}
+    after = gconn.execute("SELECT ttl_expires FROM plans WHERE id=?",
+                          (a["plan_id"],)).fetchone()[0]
+    assert after == before                       # refused, and nothing moved
+    with immediate(gconn):
+        assert claims.renew(gconn, a["plan_id"], "aria", now_s())["renewed"] == 1
 
 
 def test_ttl_floor_is_clamped_at_declare(gconn: sqlite3.Connection) -> None:
@@ -261,6 +284,34 @@ def test_ttl_floor_is_clamped_at_declare(gconn: sqlite3.Connection) -> None:
     assert r["expires_ts"] >= now + claims.TTL_FLOOR_S
     detail = gconn.execute("SELECT detail FROM events WHERE action='declared'").fetchone()["detail"]
     assert "clamped" in detail
+
+
+def test_ttl_ceiling_is_clamped_at_declare(gconn: sqlite3.Connection) -> None:
+    """break3 chaos-F4: an unbounded `ttl_s` was a HARD LOCK.
+
+    `declare_plan(ttl_s=2**31)` minted a 68-year claim: a non-owner `release` is refused by
+    design, the sweep never reaches it, and the only exit was a DB shell. The README promises
+    "advisory with TTL, never hard locks", so the floor needed its twin.
+    """
+    now = now_s()
+    r = declare(gconn, "aria", [USER], ttl_s=2 ** 31)
+    assert r["ok"] is True
+    assert r["expires_ts"] <= now + claims.TTL_CEIL_S + 1
+    detail = gconn.execute("SELECT detail FROM events WHERE action='declared'").fetchone()["detail"]
+    assert f"clamped to {claims.TTL_CEIL_S}s" in detail
+
+
+@pytest.mark.parametrize("ttl_s", [2 ** 62, 10 ** 15, 10 ** 30])
+def test_an_oversized_ttl_is_refused_as_data_never_raised(gconn: sqlite3.Connection,
+                                                          ttl_s: int) -> None:
+    """break3 chaos-F5: these three overflowed `iso()` with OSError / ValueError /
+    OverflowError, escaping a tool surface that promises errors as DATA (tools.py §5).
+    `gconn` is per-test, so each case declares on virgin ground and cannot short-circuit to
+    `conflict` — which is exactly what masked the raise in the breaker's first probe.
+    """
+    r = declare(gconn, "aria", [LONELY], ttl_s=ttl_s)
+    assert r["ok"] is True and isinstance(r["expires_iso"], str)
+    assert r["expires_ts"] <= now_s() + claims.TTL_CEIL_S + 1
 
 
 def test_implicit_renew_on_an_in_plan_gate_hit(gconn: sqlite3.Connection) -> None:

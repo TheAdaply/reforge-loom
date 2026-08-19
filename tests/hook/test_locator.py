@@ -158,6 +158,33 @@ def test_symlinked_repo_spelling_gates_identically(tmp_path: Path) -> None:
         assert (loc.action, loc.path, loc.qualname) == ("gate", "src/m.py", "Outer/method")
 
 
+def test_unicode_spelling_of_a_path_reaches_the_wire_normalized(tmp_path: Path) -> None:
+    """break3 journey-J1: the hook's half of "one file, one identity".
+
+    The file is written DECOMPOSED (NFD) — the spelling a macOS zip or Finder copy leaves —
+    and the tool payload sends the COMPOSED (NFC) spelling a keyboard or an LLM produces.
+    Both must reach `/gate` as the ONE path the indexer keyed the graph on, or the gate
+    resolves nothing and answers `new_path`/allow over a live foreign claim.
+
+    Pure strings plus `realpath`, so it fails on a case-sensitive Linux CI too, not only on
+    the APFS checkout where the breaker found it.
+    """
+    import unicodedata
+
+    nfc, nfd = "caf\u00e9.py", "cafe\u0301.py"
+    root = _write(tmp_path / "\u00c5pen")               # an accented REPO ROOT, composed
+    (Path(root) / "src" / nfd).write_text(SRC, encoding="utf-8")
+    old = "        return inner()"
+    spellings = {locate("Edit", {"file_path": f"{root}/src/{name}", "old_string": old}, root).path
+                 for name in (nfc, nfd)}
+    assert spellings == {f"src/{nfc}"}
+    # ...and the repo_root's own spelling cannot split the identity either: a decomposed
+    # root against a composed payload used to fail the prefix test outright -> PASS, i.e. no
+    # server call at all for every edit in the checkout.
+    assert locate("Edit", {"file_path": f"{root}/src/{nfc}", "old_string": old},
+                  unicodedata.normalize("NFD", root)).path == f"src/{nfc}"
+
+
 def test_dot_dot_alias_is_normalized_before_the_wire(tmp_path: Path) -> None:
     """gate-F2: an in-repo `..` round trip must reach the wire as the indexed spelling."""
     root = _write(tmp_path)

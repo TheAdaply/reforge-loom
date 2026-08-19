@@ -101,8 +101,17 @@ def call_gate(cfg: dict, body: dict, timeout_s: float = 1.5) -> dict:
 
 
 def fail_open(reason: str) -> tuple[int, str, str]:
-    """Loud on stdout (the only channel visible at exit 0); stderr is the debug/audit line."""
+    """Loud on stdout (the only channel visible at exit 0); stderr is the debug/audit line.
+
+    It is also loud in the AUDIT (break3 chaos-F8). The record used to fall through to
+    `main`'s `setdefault("decision", ... "allow")`, so an OFF gate — no config, a dead
+    server, a 500 from a full disk, the wall deadline — was written to
+    `~/.loom/gate-audit.jsonl` as an ordinary `allow` with no reason attached. That is the
+    one line an incident is reconstructed from, and it could not tell a checked edit from an
+    unchecked one. `bypass` has always been stamped this way; so is this now.
+    """
     message = _NOT_INITIALIZED if reason == "no_config" else _UNREACHABLE
+    _REC.update(decision="fail_open", case="fail_open", reason=reason)
     return (0, json.dumps({"systemMessage": message}),
             f"loom: WARNING — gate failed open ({reason}); coordination degraded")
 

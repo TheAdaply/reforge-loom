@@ -7,6 +7,8 @@ subprocess server, in `test_concurrency.py`.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import sqlite3
 
 from conftest import REPO, SPEC, nid
@@ -170,3 +172,61 @@ def test_spec_is_inlined_in_the_deny_so_the_blocked_agent_needs_no_second_call(
     for heading in ("## Goal", "## Write targets", "## New/changed interfaces", "## Assumes",
                     "## Out of scope"):
         assert heading in d["message"]
+
+
+# ------------------------------------------------------- the ROUTE's always-200 contract
+
+
+def _gate_route(db: str, repos: dict[str, str]):
+    """The real `POST /gate` endpoint, reachable without a server process or an HTTP client.
+
+    `build_server` closes the routes over its state, so the only handle on `gate_route` is
+    the Starlette app it builds. Driving the coroutine with a hand-made ASGI scope keeps this
+    test on the ROUTE (where the try/except lives) instead of on `gate_decision` below it.
+    """
+    from loom.server.app import build_server
+
+    app = build_server(db, repos).streamable_http_app(streamable_http_path="/mcp",
+                                                      host="127.0.0.1")
+    return next(r.endpoint for r in app.routes if getattr(r, "path", None) == "/gate")
+
+
+def _post(endpoint, body: bytes) -> tuple[int, dict]:
+    from starlette.requests import Request
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    scope = {"type": "http", "method": "POST", "path": "/gate", "query_string": b"",
+             "headers": [(b"content-type", b"application/json")]}
+    resp = asyncio.run(endpoint(Request(scope, receive)))
+    return resp.status_code, json.loads(bytes(resp.body).decode("utf-8"))
+
+
+def test_gate_answers_200_and_the_five_keys_when_the_decision_itself_fails(
+        graph_db: str, tmp_path, monkeypatch, capsys) -> None:
+    """break3 chaos-F2: on a FULL DISK the audit INSERT inside `gate_decision` raised
+    `sqlite3.OperationalError: database or disk is full`, so `/gate` answered HTTP 500 and
+    every hook in the fleet failed open — silently, while `/health` still said `{"ok": true}`.
+    §6/protocol.md:204 is unconditional: always HTTP 200, always exactly these five keys.
+    """
+    import loom.server.app as app_module
+
+    endpoint = _gate_route(graph_db, {REPO: str(tmp_path)})
+    body = json.dumps({"agent": "bo", "repo": REPO, "path": "models.py",
+                       "qualname": "User"}).encode("utf-8")
+
+    status, ok_answer = _post(endpoint, body)
+    assert status == 200 and set(ok_answer) == WIRE_KEYS      # the route works at all
+
+    def full_disk(*a, **k):
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(app_module, "gate_decision", full_disk)
+    status, answer = _post(endpoint, body)
+
+    assert status == 200
+    assert set(answer) == WIRE_KEYS                           # exactly five, no error key
+    assert answer["decision"] == "allow"                      # advisory, never a hard deny
+    # ...and the operator is told, since the audit trail is the thing that just failed.
+    assert "WARNING" in capsys.readouterr().err

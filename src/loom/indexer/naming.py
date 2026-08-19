@@ -11,6 +11,7 @@ stdlib only. `node_ref` / `split_ref` are re-exported from `loom.server.ids`
 
 from __future__ import annotations
 
+import unicodedata
 from collections.abc import Sequence
 from pathlib import PurePosixPath
 
@@ -33,8 +34,19 @@ def qualname(components: Sequence[str]) -> str:
 
 
 def norm_path(p: str) -> str:
-    """Repo-root-relative, POSIX-normalized path (specgate §3.4 — loom's own earlier MVP)."""
-    return str(PurePosixPath(p.replace("\\", "/")))
+    """Repo-root-relative, POSIX- and NFC-normalized path (specgate §3.4 — loom's own MVP).
+
+    NFC is the second half of P0-1's "one file, one identity" (break3 journey-J1). `café.py`
+    has two byte spellings — decomposed (`cafe` + U+0301, what a macOS zip, a Finder copy or
+    any non-precomposing tool leaves on disk) and composed (U+00E9, what a keyboard, a fresh
+    clone, `git ls-files` and every LLM emit). APFS opens both as ONE file; loom compared
+    STRINGS, so the indexer keyed the graph on whichever spelling it walked and a gate call
+    in the other spelling resolved nothing -> `new_path` -> ALLOW, straight over a live
+    foreign write claim, and the edit landed. One form, chosen on BOTH sides — here, which
+    keys the graph, and in `hook/locator._rel`, which produces the wire path — closes it.
+    NFC is the composed form git and the web platform already normalize to.
+    """
+    return unicodedata.normalize("NFC", str(PurePosixPath(p.replace("\\", "/"))))
 
 
 def prefix_candidates(name_path: str) -> list[str]:

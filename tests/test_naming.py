@@ -34,6 +34,22 @@ def test_norm_path_posix_normalizes() -> None:
     assert norm_path("README.md") == "README.md"
 
 
+def test_norm_path_gives_one_unicode_spelling_one_identity() -> None:
+    """break3 journey-J1: `café.py` had TWO coordination identities.
+
+    NFD (`cafe` + U+0301) is what a macOS zip, a Finder copy or any non-precomposing tool
+    leaves on disk and what the indexer then keyed the graph on; NFC (U+00E9) is what a
+    keyboard, a fresh clone and every LLM emit. APFS opens both as one file, so an edit sent
+    in the other spelling resolved to nothing — `new_path` — and was ALLOWED over a live
+    foreign write claim. `norm_path` is the single place both sides pass through.
+    """
+    nfc, nfd = "caf\u00e9.py", "cafe\u0301.py"
+    assert nfc != nfd                                    # byte-different, same file on disk
+    assert norm_path(nfd) == norm_path(nfc) == nfc       # ...and one node key, the NFC one
+    assert norm_path("src/\u0041\u030apen/caf\u00e9.py") == norm_path("src/\u00c5pen/cafe\u0301.py")
+    assert norm_path("plain/ascii.py") == "plain/ascii.py"   # ASCII is untouched
+
+
 def test_prefix_candidates_longest_first() -> None:
     assert prefix_candidates("A/b/c") == ["A/b/c", "A/b", "A"]
     assert prefix_candidates("decode_jwt_token") == ["decode_jwt_token"]

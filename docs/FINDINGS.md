@@ -564,3 +564,41 @@ _Provenance: `scratchpad/redteam/{findings-gate,findings-claimsx,findings-indexe
 `verified.md`, and `firstcontact/attack{1,2,3}.out`. Spec references are to
 `loom/docs/BUILD-SPEC.md`. The red-team synthesis above modified no file under `loom/src` or
 `loom/tests`; the final simplification pass, recorded in its own section, did._
+
+## Break-cycle-3 backlog
+
+Break-simplify cycle 3 (2026-08-19, on `8214dca`): property-fuzz, chaos and lifecycle-journey
+breakers → confirmation gate (9 re-run-confirmed findings, 0 not-reproduced) → fix pass (all 9
+FIX-NOW items applied, 331 → 345 tests + 1 strict xfail) → simplification pass (net −120 lines).
+Cycle records: `scratchpad/break3/{CONFIRMED,fix-ledger,simplify-ledger}.md`. The items below are
+the design-needed remainders — no code for them landed in this cycle.
+
+- **BC3-1 (P0, top) — expansion-container downward authority (fuzz F1/F1b).** §5.3's CALLS hop
+  can expand a declared target into a claim on a *container* (Class/File) node; `find_conflicts`
+  contends expansion members up-only, but `check_node` judges over the up-closure of the edited
+  node — so two agents end up write-authorized on one node, order-dependently, and one CALLS hop
+  buys file-granular over-ownership. Pinned by the `xfail(strict=True)` case in
+  `tests/server/test_stateful_claims.py`: fixing it flips the marker to XPASS ("delete me"). Fix
+  needs design (mark expansion-acquired claims and deny their downward authority in `check_node`,
+  or contend expanded members over up∪down) without reintroducing the file-granular conflicts
+  council W2 removed.
+- **BC3-2 — index concurrency (chaos F1).** `loom index` holds one `BEGIN IMMEDIATE` for the
+  whole rebuild; gate audit/renew writes block past the hook's 1.5 s budget and fail OPEN across
+  every repo the server's database serves. This cycle landed only the operator stderr warning;
+  closing the window needs chunked indexing or shadow-index-and-swap.
+- **BC3-3 — `/gate` "could not judge" wire case (from the F2 fix).** A failed `gate_decision`
+  (e.g. disk full) now answers an advisory 200 reusing `case: "unindexed"` plus a stderr
+  WARNING, so hook-side it is indistinguishable from an unindexed repo. Decide whether the frozen
+  six-case wire enum gains a seventh case.
+- **BC3-4 (low) — `loom init` writes through a symlinked CLAUDE.md (journey J4e)** to a target
+  outside the repo. Refuse, or realpath-check, symlinked targets before appending the snippet.
+- **BC3-5 (docs) — BUILD-SPEC §9.1 still prints the pre-W5 `EXCLUDE_DIRS`.** Frozen text; needs a
+  §11 DECISIONS-DELTA entry. The two non-frozen copies of the same falsehood (README,
+  troubleshooting) were corrected this cycle.
+- **BC3-6 (tests) — the dashboard has no executable test.** `test_dashboard.py` string-matches
+  the page source only. A ~40-line stdlib-node harness that renders the page's own `<script>`
+  over real `/state` payloads exists at `scratchpad/break3/simplify/js/` — worth landing the
+  next time the fabric is touched.
+- **BC3-7 (ops note) — NFC re-index.** Databases indexed before the NFC path normalization hold
+  decomposed path keys; NFC lookups miss them until one full `loom index` (fix-ledger §11.34
+  residual).

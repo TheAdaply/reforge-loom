@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import json
-import socket
-import subprocess
-import sys
-import time
 import urllib.request
 from collections.abc import Iterator
 
 import pytest
+from conftest import server_process
 
 from loom.server.claims import SWEEP_GRACE_S, declare_plan, sweep
 from loom.server.db import connect, immediate, iso, now_s
@@ -37,27 +34,9 @@ Everything else.
 @pytest.fixture()
 def live_server(graph_db, tmp_path) -> Iterator[tuple[str, str]]:
     """(base_url, db_path) of a subprocess server over the seeded fixture graph."""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "loom.server.app", "--repo-root", str(tmp_path),
-         "--repo", "demo", "--port", str(port), "--host", "127.0.0.1", "--db", graph_db],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    try:
-        deadline = time.monotonic() + 20
-        while time.monotonic() < deadline:
-            with socket.socket() as s:
-                if s.connect_ex(("127.0.0.1", port)) == 0:
-                    break
-            time.sleep(0.15)
+    with server_process("--repo-root", str(tmp_path), "--repo", "demo",
+                        "--db", graph_db) as (port, _p):
         yield f"http://127.0.0.1:{port}", graph_db
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:  # pragma: no cover
-            proc.kill()
 
 
 def _get(url: str) -> tuple[int, str]:

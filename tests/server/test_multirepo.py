@@ -16,17 +16,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import socket
-import subprocess
 import sys
-import time
 import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import SPEC
+from conftest import SPEC, server_process
 from mcp import Client
 
 from loom.cli.main import main as cli_main
@@ -44,28 +41,6 @@ SHARED = "svc.py"
 
 
 # --------------------------------------------------------------------------- rig
-
-
-def free_port() -> int:
-    s = socket.socket()
-    try:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-    finally:
-        s.close()
-
-
-def wait_for_port(port: int, proc: subprocess.Popen, timeout: float = 20.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:                        # pragma: no cover
-            raise RuntimeError(f"server died: {proc.communicate()[1]}")
-        try:
-            socket.create_connection(("127.0.0.1", port), 0.25).close()
-            return
-        except OSError:
-            time.sleep(0.05)
-    raise TimeoutError(f"server did not open port {port}")   # pragma: no cover
 
 
 def get(url: str) -> dict:
@@ -114,21 +89,9 @@ def two_repo_db(tmp_path) -> str:
 @pytest.fixture()
 def two_repo_server(two_repo_db: str) -> Iterator[tuple[str, str]]:
     """(base_url, db_path) of a subprocess server serving alpha=pyrepo, beta=pyrepo2."""
-    port = free_port()
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "loom.server.app",
-         "--repo-root", f"alpha={PYREPO}", "--repo-root", f"beta={PYREPO2}",
-         "--db", two_repo_db, "--host", "127.0.0.1", "--port", str(port)],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    try:
-        wait_for_port(port, proc)
+    with server_process("--repo-root", f"alpha={PYREPO}", "--repo-root", f"beta={PYREPO2}",
+                        "--db", two_repo_db) as (port, _p):
         yield f"http://127.0.0.1:{port}", two_repo_db
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:                   # pragma: no cover
-            proc.kill()
 
 
 # --------------------------------------------------------------------------- §6.b/c
@@ -331,13 +294,7 @@ def test_init_still_auto_selects_the_only_repo_of_a_single_repo_server(
         index_repo(conn, "solo", PYREPO2, changed_only=False)
     finally:
         conn.close()
-    port = free_port()
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "loom.server.app", "--repo-root", f"solo={PYREPO2}",
-         "--db", db, "--host", "127.0.0.1", "--port", str(port)],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    try:
-        wait_for_port(port, proc)
+    with server_process("--repo-root", f"solo={PYREPO2}", "--db", db) as (port, _p):
         base = f"http://127.0.0.1:{port}"
         assert get(base + "/health") == {"ok": True, "repo": "solo", "repos": ["solo"],
                                          "auth": "open"}
@@ -348,12 +305,6 @@ def test_init_still_auto_selects_the_only_repo_of_a_single_repo_server(
                 "--repo-root", str(root))
         assert 'repo = "solo"' in (root / ".claude" / "loom.toml").read_text(encoding="utf-8")
         assert "initialized for repo 'solo'" in capsys.readouterr().out
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:                   # pragma: no cover
-            proc.kill()
 
 
 # --------------------------------------------------------------------------- §6 unit: CLI args

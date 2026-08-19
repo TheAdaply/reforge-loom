@@ -11,17 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import socket
 import statistics
-import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
 
 import pytest
-from conftest import SPEC, seed
+from conftest import SPEC, seed, server_process
 from mcp import Client
 
 from loom.server.claims import gate_decision
@@ -30,29 +27,6 @@ from loom.server.db import connect, now_s
 AUTH = "svc.py::AuthService/authenticate"
 USER = "models.py::User"
 LONELY = "iso.py::lonely"
-
-
-def free_port() -> int:
-    s = socket.socket()
-    try:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-    finally:
-        s.close()
-
-
-def wait_for_port(port: int, proc: subprocess.Popen, timeout: float = 20.0) -> None:
-    """Poll until the server accepts connections (M4 owns the shipped helper; this is local)."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(f"server died: {proc.communicate()[1]}")
-        try:
-            socket.create_connection(("127.0.0.1", port), 0.25).close()
-            return
-        except OSError:
-            time.sleep(0.05)
-    raise TimeoutError(f"server did not open port {port}")
 
 
 def post(port: int, path: str, body: dict | None = None, timeout: float = 5.0) -> dict:
@@ -69,20 +43,8 @@ def live(tmp_path) -> Iterator[tuple[int, str]]:
     """(port, db_path) of a subprocess server serving the seeded fixture graph."""
     db = str(tmp_path / "loom.sqlite3")
     seed(db)                                   # pre-seed BEFORE the server opens the file
-    port = free_port()
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "loom.server.app", "--repo-root", str(tmp_path),
-         "--repo", "demo", "--port", str(port), "--host", "127.0.0.1", "--db", db],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    try:
-        wait_for_port(port, proc)
+    with server_process("--repo-root", str(tmp_path), "--repo", "demo", "--db", db) as (port, _p):
         yield port, db
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:      # pragma: no cover
-            proc.kill()
 
 
 def declare_args(agent: str, targets: list[str]) -> dict:

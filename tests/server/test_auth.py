@@ -20,10 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import socket
-import subprocess
 import sys
-import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
@@ -31,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import REPO, nid
+from conftest import REPO, nid, server_process
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 
@@ -161,28 +158,6 @@ def test_serve_refuses_to_start_on_an_empty_token(tmp_path, monkeypatch, capsys)
 # --------------------------------------------------------------------------- rig
 
 
-def free_port() -> int:
-    s = socket.socket()
-    try:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-    finally:
-        s.close()
-
-
-def wait_for_port(port: int, proc: subprocess.Popen, timeout: float = 20.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:                            # pragma: no cover
-            raise RuntimeError(f"server died: {proc.communicate()[1]}")
-        try:
-            socket.create_connection(("127.0.0.1", port), 0.25).close()
-            return
-        except OSError:
-            time.sleep(0.05)
-    raise TimeoutError(f"server did not open port {port}")      # pragma: no cover
-
-
 def request(url: str, body: dict | None = None, token: str = "") -> dict:
     """One plain-HTTP call; raises `HTTPError` on the 401 so tests can read its body."""
     headers = {"Content-Type": "application/json"}
@@ -224,20 +199,9 @@ def token_server(tmp_path) -> Iterator[tuple[str, str]]:
         index_repo(conn, "alpha", PYREPO, changed_only=False)
     finally:
         conn.close()
-    port = free_port()
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "loom.server.app", "--repo-root", f"alpha={PYREPO}",
-         "--db", db, "--host", "127.0.0.1", "--port", str(port), "--token", TOKEN],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    try:
-        wait_for_port(port, proc)
+    with server_process("--repo-root", f"alpha={PYREPO}", "--db", db,
+                        "--token", TOKEN) as (port, _p):
         yield f"http://127.0.0.1:{port}", db
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:                       # pragma: no cover
-            proc.kill()
 
 
 def run_cli(monkeypatch: pytest.MonkeyPatch, *argv: str) -> None:
@@ -417,5 +381,9 @@ def test_doctor_fails_the_auth_row_on_a_wrong_token(token_server, tmp_path, monk
     # ...and the rows that do not depend on the credential stay green, so the table still
     # points at the one thing to fix.
     assert [rows[c][0] for c in ("config", "server", "repo match", "gate binary",
-                                 "hook registered", "mcp registered",
-                                 "gate round-trip")] == ["PASS"] * 7
+                                 "hook registered", "mcp registered")] == ["PASS"] * 6
+    # The round-trip row DOES depend on it, and since break3 chaos-F3 it says so: a stale
+    # credential means every real edit gets a 401 and fails open, which is a gate that is
+    # off. The old payload never reached `/gate`, so this row printed PASS through it.
+    assert rows["gate round-trip"][0] == "FAIL"
+    assert "failed open" in rows["gate round-trip"][1]

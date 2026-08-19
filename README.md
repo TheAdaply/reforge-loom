@@ -141,8 +141,9 @@ Ten checks, one PASS/FAIL/WARN row each, exit 0 unless something FAILs: the conf
 wins discovery, the server's reachability and served repos (with its auth mode), whether the
 shared token your config carries satisfies that server, whether your configured repo is one of
 them, `loom-gate` on PATH, the PreToolUse hook in `.claude/settings.json`, the loom entry in
-`.mcp.json`, a **real** gate round-trip (a synthetic payload through the actual hook binary, which
-must exit 2), whether your repo has an index yet, and whether that index has fallen behind the
+`.mcp.json`, a **real** gate round-trip (a synthetic edit through the actual hook binary, which
+must reach the server and come back clean), whether your repo has an index yet, and whether that
+index has fallen behind the
 working tree. The last two are WARN, not FAIL — each is a one-command fix.
 
 It is the fastest answer to "is loom actually doing anything here?". Every row is mapped to a fix
@@ -258,9 +259,10 @@ per-repo auth). No cross-repo edges or claims — a plan lives in exactly one re
 tracking. No impact analysis beyond one-hop CALLS expansion. The eval's real-codebase three-arm
 runs are post-MVP (the harness and metrics ship now).
 
-The indexer also skips a fixed set of directories, including `tests/`, `frontend/` and `alembic/`
-(`src/loom/indexer/walk.py`). Skipped directories get no nodes, so edits inside them are always
-allowed: **symbols under `tests/` are not claimable.** The set is not configurable yet.
+The indexer also skips a fixed set of tooling and vendor directories — `.git/`, `.venv/`, `venv/`,
+`node_modules/`, `site-packages/`, `build/`, `dist/`, `__pycache__/` (`src/loom/indexer/walk.py`).
+Skipped directories get no nodes, so edits inside them are always allowed. Test trees are indexed
+and claimable like any other source. The set is not configurable yet.
 
 ## License and credits
 

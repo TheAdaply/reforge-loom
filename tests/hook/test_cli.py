@@ -138,6 +138,36 @@ def test_init_refuses_an_unreachable_server(repo_root, home, fake_gate, monkeypa
     assert not Path(repo_root, ".claude").exists()
 
 
+@pytest.mark.parametrize("settings_json, complaint", [
+    ({"hooks": {"PreToolUse": {"matcher": "Edit"}}}, '"hooks.PreToolUse"'),
+    ({"hooks": [{"matcher": "Edit"}]}, '"hooks"'),
+])
+def test_init_refuses_a_malformed_settings_shape_instead_of_a_traceback(
+    stub, repo_root, home, fake_gate, monkeypatch, capsys, settings_json, complaint
+) -> None:
+    """break3 journey-J4c/J4d: valid JSON, wrong SHAPE — and `loom init` crashed.
+
+    `PreToolUse` as an object gave `AttributeError: 'dict' object has no attribute 'append'`;
+    `hooks` as an array gave `'list' object has no attribute 'setdefault'`. Both are shapes a
+    hand-edited settings.json really takes, and both dumped a traceback from the middle of a
+    verb that is writing a checkout's files. The JSONDecodeError guard beside them has always
+    said the right thing; these two shapes simply were not checked.
+    """
+    monkeypatch.setenv("HOME", home)
+    settings = Path(repo_root, ".claude", "settings.json")
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps(settings_json), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc:
+        run_cli(monkeypatch, "init", "--server", stub.url, "--repo-root", repo_root)
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "Traceback" not in err and "AttributeError" not in err
+    assert complaint in err and "fix it by hand" in err
+    assert json.loads(settings.read_text(encoding="utf-8")) == settings_json   # untouched
+
+
 def test_empty_narrowing_flag_is_a_hard_error(stub, repo_root, home, fake_gate, monkeypatch) -> None:
     monkeypatch.setenv("HOME", home)
     with pytest.raises(SystemExit):
@@ -405,6 +435,32 @@ def test_index_honours_an_explicit_repo_salt(tmp_path, monkeypatch, capsys) -> N
     assert set(r[0] for r in con.execute("SELECT DISTINCT repo FROM nodes")) == {
         "teamrepo", "clone-with-other-basename"}
     con.close()
+
+
+def test_index_warns_the_operator_that_it_holds_the_write_lock(tmp_path, monkeypatch,
+                                                               capsys) -> None:
+    """break3 chaos-F1 mitigation: the silent multi-second coordination gap gets a voice.
+
+    `_index` wraps the whole rebuild in one `BEGIN IMMEDIATE`. On a big tree that lock is
+    held for seconds, and the gate is not a pure reader — its audit row and its implicit
+    renew are writes — so live `/gate` calls blew past the hook's 1.5s timeout and FAILED
+    OPEN, across every repo on the database, with no signal anywhere. Chunking the rebuild
+    is the real fix and is backlog; this row is the operator's warning that it is happening.
+
+    The notice goes to STDERR on purpose: `loom index`'s stdout is one line of JSON that
+    callers parse, and it must stay that.
+    """
+    repo_root = tmp_path / "repo"
+    (repo_root / "src").mkdir(parents=True)
+    (repo_root / "src" / "mod.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+
+    run_cli(monkeypatch, "index", "--repo-root", str(repo_root),
+            "--db", str(tmp_path / "loom.sqlite3"))
+
+    cap = capsys.readouterr()
+    assert json.loads(cap.out.strip())["repo"] == "repo"        # stdout is still just JSON
+    assert "WARNING" in cap.err and "write lock" in cap.err and "fail OPEN" in cap.err
+    assert "released the write lock after" in cap.err           # ...and for how long
 
 
 def test_init_gitignores_the_identity_file(tmp_path, monkeypatch):

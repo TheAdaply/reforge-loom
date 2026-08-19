@@ -167,11 +167,11 @@ def register(mcp: MCPServer, connection: Callable[[], sqlite3.Connection],
         return {"ok": True, "claims": claims.active_claims(conn, in_repo, now)}
 
     @mcp.tool()
-    def renew(plan_id: str) -> dict[str, Any]:
-        """Extend an active plan's TTL. `renewed: 0` is a verdict: re-declare, do not edit on."""
+    def renew(plan_id: str, agent: str) -> dict[str, Any]:
+        """Owner-only: extend YOUR plan's TTL. `renewed: 0` is a verdict — re-declare, do not edit."""
         conn = connection()
         with immediate(conn):
-            return claims.renew(conn, plan_id, now_s())
+            return claims.renew(conn, plan_id, agent, now_s())
 
     @mcp.tool()
     def release(plan_id: str, agent: str, status: str = "done") -> dict[str, Any]:

@@ -259,6 +259,38 @@ def test_fail_open_on_non_200(stub, repo_root, configure, payload, run_gate) -> 
     assert "systemMessage" in r.stdout
 
 
+@pytest.mark.parametrize("case, server_url, status", [
+    ("URLError", "http://127.0.0.1:9", 200),      # nothing listening
+    ("HTTPError", "", 500),                       # the stub, answering 500 (a full-disk /gate)
+])
+def test_a_fail_open_is_audited_as_a_fail_open_not_as_an_allow(
+    stub, repo_root, home, configure, payload, run_gate, case, server_url, status
+) -> None:
+    """break3 chaos-F8: an OFF gate wrote the same audit line as a checked, allowed edit.
+
+    `~/.loom/gate-audit.jsonl` is the only record an incident is reconstructed from. Every
+    fail-open — no config, dead server, 500 from a disk-full `/gate` (chaos-F2), the wall
+    deadline — fell through to `main`'s `setdefault("decision", "allow")` and became
+    indistinguishable from a decision the server actually made. That is what made chaos-F1
+    and chaos-F2 forensically invisible.
+    """
+    configure(server_url or stub.url, repo_root)
+    stub.status = status
+    r = run_gate(payload("server_down_failopen"))
+
+    assert r.returncode == 0                                    # still fail-OPEN
+    record = json.loads(Path(home, ".loom", "gate-audit.jsonl").read_text(encoding="utf-8"))
+    assert record["decision"] == "fail_open" and record["case"] == "fail_open"
+    assert record["reason"] == case
+    # ...and a real allow is still a plain allow, or the distinction buys nothing.
+    stub.status, stub.response = 200, ALLOW
+    configure(stub.url, repo_root)
+    Path(home, ".loom", "gate-audit.jsonl").unlink()
+    run_gate(payload("in_plan_allow"))
+    clean = json.loads(Path(home, ".loom", "gate-audit.jsonl").read_text(encoding="utf-8"))
+    assert clean["decision"] == "allow" and "reason" not in clean
+
+
 def test_fail_open_without_config(repo_root, home, payload, run_gate) -> None:
     r = run_gate(payload("in_plan_allow"))
     assert r.returncode == 0
