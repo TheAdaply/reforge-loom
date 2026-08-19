@@ -212,3 +212,26 @@ def test_unknown_tools_and_out_of_repo_paths_pass(tmp_path: Path) -> None:
     assert locate("Edit", {"file_path": "/etc/hosts", "old_string": "x"}, root).action == "pass"
     assert locate("Edit", {}, root).action == "pass"
     assert locate("mcp__serena__rename_symbol", {"relative_path": "src/m.py"}, root).action == "pass"
+
+
+def test_bom_file_keeps_symbol_level_gating(tmp_path: Path) -> None:
+    """break4: a UTF-8 BOM (Windows 'UTF-8 with BOM' saves) made `ast.parse` raise, which
+    silently degraded every edit in the file to FILE level — and denied the symbol's own
+    claim holder on their own code. `utf-8-sig` strips it; plain files are unaffected."""
+    root = _write(tmp_path)
+    p = Path(root) / "src" / "bom.py"
+    p.write_bytes(b"\xef\xbb\xbfdef foo():\n    return 1\n")
+    loc = locate("Edit", {"file_path": str(p), "old_string": "    return 1"}, root)
+    assert (loc.action, loc.path, loc.qualname) == ("gate", "src/bom.py", "foo")
+
+
+def test_replace_in_files_outside_the_repo_passes(tmp_path: Path) -> None:
+    """break4 (§7.2): the same out-of-repo path that PASSes for Edit/Write must PASS for
+    replace_in_files — it is another repo's business, not an 'unscoped path set'. The
+    unscoped local deny stays for a missing path and for an in-repo directory."""
+    root = _write(tmp_path)
+    assert locate("mcp__serena__replace_in_files",
+                  {"relative_path": "/etc/hosts"}, root).action == "pass"
+    assert locate("mcp__serena__replace_in_files", {}, root).action == "deny_local"
+    assert locate("mcp__serena__replace_in_files",
+                  {"relative_path": "src"}, root).action == "deny_local"

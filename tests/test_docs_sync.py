@@ -46,7 +46,9 @@ def test_every_mcp_tool_is_named_in_the_protocol_reference() -> None:
     names = [line.split("def ")[1].split("(")[0]
              for line in inspect.getsource(tools.register).splitlines()
              if line.strip().startswith("def ") and "    def " in line]
-    names = [n for n in names if n not in ("pick", "unknown")]
+    # `pick`/`unknown` are the shared repo-resolution helpers; an underscore prefix marks
+    # any other nested non-tool helper (e.g. list_claims' busy-tolerant `_sweep`).
+    names = [n for n in names if n not in ("pick", "unknown") and not n.startswith("_")]
     assert len(names) == 9, f"the tool surface changed: {names}"
     documented = _read("docs/protocol.md")
     missing = [n for n in names if f"`{n}(" not in documented]

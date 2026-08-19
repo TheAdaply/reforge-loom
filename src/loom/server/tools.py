@@ -25,6 +25,26 @@ from loom.server import claims
 from loom.server.db import immediate, now_s
 from loom.server.ids import split_ref
 
+
+def _tx(conn: sqlite3.Connection, fn: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    """§5 errors-as-DATA at the transaction boundary (break4 RT-1).
+
+    `busy_timeout=5000` makes write-race losers queue, but a lock held LONGER than that
+    (the BC3-2 whole-index window) makes BEGIN IMMEDIATE raise SQLITE_BUSY — which escaped
+    tool bodies as an exception instead of the documented result dict. Nothing has been
+    changed when it fires (the transaction never opened), so it is a clean retry verdict.
+    """
+    try:
+        with immediate(conn):
+            return fn()
+    except sqlite3.OperationalError as exc:
+        if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+            raise
+        return {"ok": False, "reason": "busy", "retry": True,
+                "message": "loom: the coordination database is briefly locked (a large "
+                           "index or sweep holds the write lock); nothing was changed — "
+                           "retry in a few seconds."}
+
 # MULTIREPO-SPEC §2: one server serves an ORDERED list of repo names. A tool argument of
 # `""` means "the default repo" — `served[0]` — which is what preserves single-repo
 # behavior verbatim. A non-empty name the server does not serve is the §5 error shape plus
@@ -107,10 +127,9 @@ def register(mcp: MCPServer, connection: Callable[[], sqlite3.Connection],
         conn = connection()
         if (in_repo := pick(repo)) is None:
             return unknown()
-        with immediate(conn):
-            return claims.declare_plan(conn, agent=agent, repo=in_repo, branch=branch, title=title,
-                                       spec_md=spec_md, write_targets=write_targets,
-                                       assumes=assumes, ttl_s=ttl_s, now=now_s())
+        return _tx(conn, lambda: claims.declare_plan(
+            conn, agent=agent, repo=in_repo, branch=branch, title=title, spec_md=spec_md,
+            write_targets=write_targets, assumes=assumes, ttl_s=ttl_s, now=now_s()))
 
     @mcp.tool()
     def check(agent: str, node: str, repo: str = "") -> dict[str, Any]:
@@ -144,9 +163,8 @@ def register(mcp: MCPServer, connection: Callable[[], sqlite3.Connection],
                 add_assumes: list[str] = []) -> dict[str, Any]:
         """Widen an active plan before touching new ground; renews its TTL on success."""
         conn = connection()
-        with immediate(conn):
-            return claims.rescope(conn, plan_id=plan_id, add_targets=add_targets,
-                                  add_assumes=add_assumes, now=now_s())
+        return _tx(conn, lambda: claims.rescope(conn, plan_id=plan_id, add_targets=add_targets,
+                                                add_assumes=add_assumes, now=now_s()))
 
     @mcp.tool()
     def get_plan(plan_id: str) -> dict[str, Any]:
@@ -162,20 +180,24 @@ def register(mcp: MCPServer, connection: Callable[[], sqlite3.Connection],
         if (in_repo := pick(repo)) is None:
             return unknown()
         now = now_s()
-        with immediate(conn):
+
+        def _sweep() -> dict[str, Any]:
             claims.sweep(conn, in_repo, now)
+            return {"ok": True}
+
+        # The sweep is hygiene, not the answer: active_claims filters on ttl_expires
+        # itself, so a busy database skips the sweep and the listing is still correct.
+        _tx(conn, _sweep)
         return {"ok": True, "claims": claims.active_claims(conn, in_repo, now)}
 
     @mcp.tool()
     def renew(plan_id: str, agent: str) -> dict[str, Any]:
         """Owner-only: extend YOUR plan's TTL. `renewed: 0` is a verdict — re-declare, do not edit."""
         conn = connection()
-        with immediate(conn):
-            return claims.renew(conn, plan_id, agent, now_s())
+        return _tx(conn, lambda: claims.renew(conn, plan_id, agent, now_s()))
 
     @mcp.tool()
     def release(plan_id: str, agent: str, status: str = "done") -> dict[str, Any]:
         """Owner-only: tombstone a plan's claims and close it as done or superseded."""
         conn = connection()
-        with immediate(conn):
-            return claims.release(conn, plan_id, agent, status, now_s())
+        return _tx(conn, lambda: claims.release(conn, plan_id, agent, status, now_s()))

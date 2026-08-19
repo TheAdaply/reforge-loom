@@ -100,6 +100,15 @@ than blocks.
 CALLS neighbours in both directions**, and `expanded_from` shows which target pulled in which
 neighbour. IMPORTS edges are never expanded.
 
+Those swept-in claims are weaker than the ones you named. A claim's **origin** bounds its
+authority: a target you *named* carries full containment authority (below), while an *expanded*
+claim — one the CALLS hop pulled in — authorizes and contends on **that node only**. Calling a
+class is not owning it: if the hop sweeps in a class or file, its methods stay freely claimable
+by others, and your gate will not let you edit them either. Naming a swept node later (via
+`rescope`) promotes it to a full claim. Every read surface marks the difference: `origin` on
+`list_claims` rows, `expanded_claims` on `get_plan`, `(expanded)` in `loom ls`/`show` and the
+dashboard.
+
 **Refused, conflict:**
 
 ```json
@@ -113,10 +122,15 @@ Nothing was claimed. `owner_spec_md` is the whole point: read it, build against 
 declares, narrow your targets, and declare again.
 
 A claim is judged against its **containment scope** — the symbol's class and file above it, and
-everything it contains below it. A claim on a file therefore covers every symbol in that file, and
-a claim on a method collides with a claim on its class. Siblings do not collide: two agents may
-hold two unrelated functions in the same file, which is the difference between loom and a file
-lock.
+everything it contains below it. A *named* claim on a file therefore covers every symbol in that
+file, and a claim on a method collides with a claim on its class. An *expanded* claim covers its
+own node only, wherever it sits in the hierarchy. Siblings do not collide: two agents may hold
+two unrelated functions in the same file, which is the difference between loom and a file lock.
+
+One warning kind is about you, not a rival: `{"kind": "self-held", "owner_plan_id": ...}` means
+YOU already hold a declared target under another of your own active plans. It never blocks —
+but two of your plans now cover the same ground, and releasing one still leaves the other
+holding it. Usually the honest move was `rescope` on the plan you already have.
 
 **Refused, bad spec:**
 
@@ -125,6 +139,15 @@ lock.
  "validation_errors": ["missing heading: ## Assumes"],
  "unresolved": [{"query": "handel_login", "suggestions": ["auth.py::handle_login"]}]}
 ```
+
+**Refused, busy** (any mutating tool — declare_plan, rescope, renew, release):
+
+```json
+{"ok": false, "reason": "busy", "retry": true, "message": "loom: the coordination database ..."}
+```
+
+Something large (a full re-index) is holding the write lock past the 5-second queue. Nothing was
+changed; the same call succeeds once the lock clears — retry in a few seconds.
 
 ### `check(agent, node, repo="") -> allow/deny`
 
@@ -147,12 +170,14 @@ one-hop expansion as `declare_plan`; existing claims are untouched, and success 
 ### `get_plan(plan_id) -> {ok, plan}`
 
 The full spec and current claim refs of any plan, yours or not. This is how you read the plan a
-deny message named. `{"ok": false, "reason": "unknown_plan"}` if there is no such plan.
+deny message named. `expanded_claims` lists the write refs the CALLS hop swept in — those cover
+their own node only. `{"ok": false, "reason": "unknown_plan"}` if there is no such plan.
 
 ### `list_claims(repo="") -> {ok, claims}`
 
-Every active claim in the repository with its owner, plan, mode and expiry. Runs a TTL sweep first,
-so the answer is current.
+Every active claim in the repository with its owner, plan, mode, `origin` (`target` = named,
+full containment authority; `expanded` = CALLS-swept, that node only) and expiry. Runs a TTL
+sweep first, so the answer is current.
 
 ### `renew(plan_id, agent) -> {renewed, ...}`
 

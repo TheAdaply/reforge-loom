@@ -210,6 +210,7 @@ def test_ls_lists_active_claims_in_both_modes(seeded_db, monkeypatch, capsys) ->
     rows = json.loads(capsys.readouterr().out)
     assert rows[0]["ref"] == "src/app.py::AuthService/authenticate"
     assert (rows[0]["mode"], rows[0]["agent"], rows[0]["plan_id"]) == ("write", "aria", "lm-9c1x")
+    assert rows[0]["origin"] == "target"    # break4 cli-F1: authority depth is board-visible
 
 
 def test_show_renders_plans_and_nodes(seeded_db, monkeypatch, capsys) -> None:
@@ -481,6 +482,8 @@ def test_init_gitignores_the_identity_file(tmp_path, monkeypatch):
             "--agent", "t", "--repo-root", str(repo_root))
     lines = (repo_root / ".gitignore").read_text().splitlines()
     assert ".claude/loom.toml" in lines and lines[0] == "__pycache__/"  # appended, not clobbered
+    assert ".loom.sqlite3*" in lines       # break4 cli-F2: never commit the live database
     run_cli(monkeypatch, "init", "--server", "http://127.0.0.1:9999",
             "--agent", "t", "--repo-root", str(repo_root))
-    assert (repo_root / ".gitignore").read_text().splitlines().count(".claude/loom.toml") == 1
+    after = (repo_root / ".gitignore").read_text().splitlines()
+    assert after.count(".claude/loom.toml") == 1 and after.count(".loom.sqlite3*") == 1

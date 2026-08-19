@@ -1234,6 +1234,48 @@ spec-vs-args set-equality validation. IN and mandatory: hook fail-open exactly p
     hole. The excluded set is vendor/tooling only; `indexer/walk.py::EXCLUDE_DIRS` is the
     authority, and `test_exclude_dirs_are_pruned` pins both directions.
 
+40. **Claim origin is board-visible** (break4 cli-F1; amends the frozen §5.6/§5.7 shapes
+    ADDITIVELY). §11.38 made `origin` decide authority depth but left it invisible: `write
+    svc.py::AuthService` printed identically whether it covered the subtree (named) or the
+    node alone (CALLS-swept), so the board answered the opposite of the gate one level down —
+    including for the claim's own holder. `list_claims` rows gain `origin`; `get_plan` gains
+    `expanded_claims` (refs; write-mode-only BY CONSTRUCTION — read claims are always minted
+    origin='target', and a future read-expansion must revisit this delta, not drift past it);
+    `loom ls --json` gains `origin`, its text row and `loom show` print `(expanded)`, `/state`
+    claims carry `origin`, and the dashboard tooltip + legend say what it means. No existing
+    key changed.
+
+41. **SQLITE_BUSY is data, not an exception** (break4 RT-1). §2's "losers of a write race must
+    queue, not error" holds for 5 s; a lock held longer (the BC3-2 whole-index window) made
+    BEGIN IMMEDIATE raise and the four mutating tools leaked it as a protocol exception,
+    violating §5 errors-as-DATA. `tools._tx` maps exactly the busy/locked class to
+    `{ok: false, reason: "busy", retry: true, message}` — nothing was changed when it fires,
+    the transaction never opened. `list_claims` skips its hygiene sweep on busy instead
+    (its WHERE filters on `ttl_expires` itself, so the listing stays correct).
+
+42. **loom never indexes its own database** (break4 cli-F2). The default layout puts
+    `.loom.sqlite3` inside the served checkout; its WAL is rewritten by every gate decision,
+    so `index_age` read permanently stale ("dirty: .loom.sqlite3-wal") and re-indexing could
+    not clear it. `discover_files` skips the `.loom.sqlite3*` basenames, and `loom init`
+    gitignores the same glob beside the identity file. A custom `--db` under another name
+    inside the repo is the operator's own layout choice and is not special-cased.
+
+43. **Two hook-side fixes with one §7.2 shape** (break4). `_edit` reads with `utf-8-sig`: a
+    UTF-8 BOM decoded as U+FEFF made `ast.parse` raise, silently degrading every edit in the
+    file to FILE level — denying the symbol's own claim holder (`collect_symbol_spans` also
+    strips a stray leading BOM for any plain-utf-8 caller). And `replace_in_files` on an
+    absolute path OUTSIDE the repo now PASSes exactly like Edit/Write ("path outside
+    repo_root -> PASS") instead of a hook-local exit-2 deny with a misleading "unscoped path
+    set" message; the unscoped deny remains for a missing path and for in-repo non-files.
+
+44. **Self-overlap warns instead of staying silent** (break4 RT-2; additive warning kind).
+    `find_conflicts`' own-plan skip minted duplicate active plans on ground the agent already
+    held — releasing the one plan the agent remembered left the silent twins blocking
+    everyone until TTL. A declared write target already write-claimed under ANOTHER of the
+    agent's active plans now yields `{kind: "self-held", owner_plan_id: ...}` in `warnings`.
+    Never blocking (§5's "an agent is never refused by itself" stands); rescope suppresses
+    self-held for the plan being rescoped — widening onto your own ground is a no-op.
+
 ---
 
 ## 12. THIRD-PARTY NOTICES (frozen content for `THIRD_PARTY_NOTICES.md`)

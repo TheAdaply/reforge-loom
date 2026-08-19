@@ -179,3 +179,39 @@ def test_errors_are_data_never_raised(tmp_path) -> None:
     assert results[6] == {"ok": False, "reason": "unknown_plan"}
     assert results[7] == {"ok": False, "reason": "unknown_plan"}
     assert results[8]["reason"] == "validation" and results[8]["validation_errors"]
+
+
+def test_busy_lock_is_returned_as_data_not_raised(tmp_path, monkeypatch) -> None:
+    """break4 RT-1: BEGIN IMMEDIATE raising SQLITE_BUSY past `busy_timeout` (the BC3-2
+    whole-index window) must surface as the §5 data shape, never escape the tool body."""
+    import sqlite3
+
+    from loom.server import claims as claims_mod
+
+    def boom(*_a, **_k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(claims_mod, "declare_plan", boom)
+    [res] = run(server(tmp_path), [("declare_plan", {
+        "agent": "aria", "title": "t", "spec_md": SPEC,
+        "write_targets": ["models.py::User"]})])
+    assert res["ok"] is False and res["reason"] == "busy" and res["retry"] is True
+    assert "retry" in res["message"]
+
+
+def test_tx_reraises_operational_errors_that_are_not_lock_contention(tmp_path) -> None:
+    """`_tx` maps ONLY the busy/locked class to a retry verdict; a schema error is a real
+    defect and must keep raising."""
+    import sqlite3
+
+    import pytest as _pytest
+
+    from loom.server.db import connect
+    from loom.server.tools import _tx
+
+    conn = connect(str(tmp_path / "t.sqlite3"))
+    try:
+        with _pytest.raises(sqlite3.OperationalError):
+            _tx(conn, lambda: conn.execute("SELECT * FROM no_such_table").fetchall())
+    finally:
+        conn.close()

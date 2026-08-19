@@ -300,7 +300,7 @@ def state_payload(c: sqlite3.Connection, repo: str, served: list[str],
     if active_ids:
         marks = ",".join("?" * len(active_ids))
         claims = [dict(r) for r in c.execute(
-            f"SELECT c.node_id, c.plan_id, c.mode, p.agent FROM claims c "
+            f"SELECT c.node_id, c.plan_id, c.mode, c.origin, p.agent FROM claims c "
             f"JOIN plans p ON p.id = c.plan_id "
             f"WHERE c.released IS NULL AND c.plan_id IN ({marks})", active_ids)]
     # repo = '' is pre-migration history (MULTIREPO §3): it belongs to no repo in particular,

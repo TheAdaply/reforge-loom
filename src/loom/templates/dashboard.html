@@ -134,7 +134,8 @@
       Each vertical thread is a file; each bead on it is a symbol. A hollow bead is unclaimed.
       A filled bead is claimed, in its owner's chip colour — solid for a write claim, ringed for
       a read claim. Faint lines between threads are CALLS edges. Hover a bead for its ref and
-      its owner.
+      its owner; a claim marked <i>expanded</i> was swept in by a CALLS hop and covers that
+      node only, never the symbols inside it.
     </p>
   </section>
   <div class="rail">
@@ -273,7 +274,8 @@ function fabricSVG(state) {
       if (c) { stroke = colorOf(c.agent); sw = 2;
                fill = c.mode === "write" ? colorOf(c.agent) : "#fcfcfb"; }
       const tip = esc(`${b.path}::${b.qualname}` + (c ?
-        `\n${c.mode} · ${c.agent} · ${planTitle.get(c.plan_id) || c.plan_id}` : "\nunclaimed"));
+        `\n${c.mode}${c.origin === "expanded" ? " (expanded — this node only)" : ""}` +
+        ` · ${c.agent} · ${planTitle.get(c.plan_id) || c.plan_id}` : "\nunclaimed"));
       beads += `<g class="beadhit" data-tip="${tip}">` +
         `<circle cx="${p.x}" cy="${p.y}" r="13" fill="transparent"/>` +
         `<circle class="bead" cx="${p.x}" cy="${p.y}" r="7" fill="${fill}" stroke="#fcfcfb" stroke-width="3.5"/>` +

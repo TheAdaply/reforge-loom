@@ -76,6 +76,8 @@ def collect_symbol_spans(source: str) -> list[tuple[str, int, int]]:
     Descends `Module` -> `ClassDef` containers only, so a def nested in a function or in a
     block statement is never emitted; a repeated qualname takes Serena's `[i]` suffix.
     """
+    if source[:1] == "﻿":
+        source = source[1:]        # a caller that read plain utf-8 keeps symbol-level spans
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
@@ -117,7 +119,10 @@ def _edit(rel: str, repo_root: str, tool_input: dict) -> Located:
         path = _abs(rel, repo_root)
         if os.stat(path).st_size > _PARSE_CAP_BYTES:
             return Located("gate", rel, None)
-        with open(path, encoding="utf-8", errors="replace") as fh:
+        # utf-8-sig: a Windows-style BOM decoded as U+FEFF makes ast.parse raise, which
+        # silently degraded every edit in the file to FILE-level and denied the symbol's
+        # own claim holder (break4). Strips a leading BOM, no-op otherwise.
+        with open(path, encoding="utf-8-sig", errors="replace") as fh:
             source = fh.read()
     except OSError:
         return Located("gate", rel, None)
@@ -134,9 +139,16 @@ def locate(tool_name: str, tool_input: dict, repo_root: str) -> Located:
     if name == "replace_in_files":
         if _field(tool_input, "dry_run"):
             return _PASS
-        rel = _rel(_field(tool_input, "relative_path"), repo_root)
-        if rel and os.path.isfile(_abs(rel, repo_root)):
-            return Located("gate", rel, None)
+        raw = _field(tool_input, "relative_path")
+        rel = _rel(raw, repo_root)
+        if rel is not None:
+            # In-repo single file gates; an in-repo directory/glob stays the unscoped deny.
+            return (Located("gate", rel, None) if os.path.isfile(_abs(rel, repo_root))
+                    else Located("deny_local", message=UNSCOPED_TMPL))
+        # An absolute path _rel rejected is genuinely OUTSIDE the repo -> PASS, identical
+        # to the Edit/Write branch (§7.2 — break4). Empty/missing stays the unscoped deny.
+        if isinstance(raw, str) and raw and norm_path(raw).startswith("/"):
+            return _PASS
         return Located("deny_local", message=UNSCOPED_TMPL)
     if name not in _GATEABLE:
         return _PASS

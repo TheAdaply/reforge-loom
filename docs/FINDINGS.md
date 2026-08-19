@@ -606,3 +606,46 @@ the design-needed remainders — no code for them landed in this cycle.
 - **BC3-7 (ops note) — NFC re-index. FIXED**: troubleshooting.md "My edits are never blocked" now
   carries the upgrade note (pre-NFC databases hold decomposed path keys; one `loom index --repo
   NAME` per repo after upgrading; fix-ledger §11.34 residual).
+
+## Break-cycle-4 (2026-08-19, HEAD 3940927 + docs commit)
+
+Five-lens ultracode attack (BC3-1 adversary, CLI journeys, concurrency/time, hook payloads,
+simplifier), every finding repro-mandatory, then one adversarial verifier per finding. 11 raw,
+8 verified CONFIRMED, 0 killed, 3 low-risk simplifier items passed through unverified and were
+self-verified during the fix round. All eleven closed in this cycle; §11.40–44 carry the deltas.
+
+- **cli-F1 (P1) — claim origin invisible on every read surface. FIXED (§11.40).** Enforcement
+  was origin-aware, the board was not: an expansion-acquired container claim printed identically
+  to a named one on `loom ls`/`show`, `list_claims`, `get_plan`, `/state` and the dashboard, so
+  the board answered the opposite of the gate one level down — including for the claim's own
+  holder. All six surfaces now carry origin (additive keys only).
+- **RT-1 (P1) — mutating tools raised OperationalError past busy_timeout. FIXED (§11.41).**
+  `tools._tx` returns `{ok:false, reason:"busy", retry:true}`; list_claims skips its hygiene
+  sweep on busy; non-lock OperationalErrors still raise (pinned).
+- **hook-bom-owner-lockout (P1) — UTF-8 BOM degraded symbol gating to file level. FIXED
+  (§11.43).** `utf-8-sig` read in `_edit` + defensive BOM strip in `collect_symbol_spans`; the
+  owner of `bom.py::foo` is no longer denied on their own method.
+- **cli-F2 (P1) — loom indexed its own SQLite db; index_age permanently stale. FIXED (§11.42).**
+  `discover_files` skips `.loom.sqlite3*`; `loom init` gitignores the same glob.
+- **RT-2 (P2) — silent duplicate plans on self-held ground. FIXED (§11.44).** Advisory
+  `self-held` warning naming the covering plan; never blocking; quiet for the plan being
+  rescoped.
+- **hook-replace-in-files-outrepo (P2) — out-of-repo path hard-denied instead of PASS. FIXED
+  (§11.43).** Same §7.2 verdict as Edit/Write now; unscoped deny kept for missing paths and
+  in-repo non-files.
+- **SIMP-1 (P2) — dead `_scope_for_conflicts` with a pre-BC3-1 docstring. REMOVED**; its
+  sibling-scope property is pinned end-to-end through `declare()` instead.
+- **SIMP-2 (P2) — byte-identical claim-insert block in declare/rescope. EXTRACTED** as
+  `_write_claim_rows` (returns the swept set rescope's promotion needs).
+- **SIMP-3 (P2, unverified→confirmed) — dead `as_json` branch in `_die`. REMOVED** (no caller
+  passed it; no doc promises JSON errors).
+- **SIMP-4 (P2, unverified→confirmed) — protocol.md stated container authority
+  unconditionally. FIXED**: origin semantics, `expanded_claims`, `origin` field, busy and
+  self-held shapes are all in the protocol reference now.
+- **SIMP-5 (P2, unverified→confirmed) — stale "strict-xfail" reference in check_node's
+  docstring. FIXED** (points at the passing pin test + fuzz invariants).
+
+What held (do not re-attack): cross-agent same-target races stayed exactly-one-winner over 100
+rounds; the BEGIN IMMEDIATE transaction law held under thread barrage; TTL boundary comparisons
+are consistent (`> now` everywhere); exit-code law (0/2, never 1) held for every payload shape
+thrown at loom-gate, including 1MB-cap boundaries, non-UTF8 bytes and closed stdin.

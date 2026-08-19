@@ -137,14 +137,18 @@ def test_contains_closure_walks_both_directions_transitively(gconn: sqlite3.Conn
 
 def test_conflict_scope_is_ancestors_and_contained_never_siblings(
         gconn: sqlite3.Connection) -> None:
-    """loom is function-level or it is nothing. `login` and `unrelated` share only a file
-    with `authenticate`; neither may enter its conflict scope."""
-    scope = claims._scope_for_conflicts(gconn, REPO, {nid(AUTH)})
-    assert scope == {nid(AUTH), nid("svc.py::AuthService"), nid("svc.py")}
-    assert nid(LOGIN) not in scope and nid(UNRELATED) not in scope
-    # A file claim still reaches everything inside it.
-    assert claims._scope_for_conflicts(gconn, REPO, {nid("svc.py")}) == {
-        nid("svc.py"), nid("svc.py::AuthService"), nid(AUTH), nid(LOGIN), nid(UNRELATED)}
+    """loom is function-level or it is nothing (§11 delta 26). `login` and `unrelated`
+    share only a file with `authenticate`; neither may enter its conflict question — a
+    mixed CONTAINS walk would pivot up through the File node and back down into every
+    sibling, coordinating at file granularity. Pinned end-to-end through declare().
+    (`login` is deliberately NOT the probe: it CALLS `authenticate`, so §5.3 sweeps it
+    into aria's claim — expansion behavior, pinned by its own tests above.)"""
+    a = declare(gconn, "aria", [AUTH])
+    assert set(a["expanded_from"][nid(AUTH)]) == {nid(LOGIN), nid("util.py::hash_pw")}
+    # `unrelated` shares only the file with authenticate: never in the conflict question.
+    assert declare(gconn, "bo", [UNRELATED])["ok"] is True
+    # A file claim still reaches everything inside it, and ancestors still contend.
+    assert declare(gconn, "cy", ["svc.py"])["reason"] == "conflict"
 
 
 def test_two_agents_may_claim_two_unrelated_symbols_in_one_file(
@@ -194,10 +198,47 @@ def test_shared_read_never_conflicts(gconn: sqlite3.Connection) -> None:
     assert r["ok"] is True and r["warnings"] == []
 
 
-def test_self_conflicts_are_skipped(gconn: sqlite3.Connection) -> None:
-    declare(gconn, "aria", [USER])
+def test_self_overlap_never_blocks_but_warns_self_held(gconn: sqlite3.Connection) -> None:
+    """break4 RT-2: the silent self-skip minted duplicate plans on ground the agent already
+    holds; releasing the one plan the agent remembered left the twins blocking everyone.
+    Still never a refusal — but the overlap now names the plan that already covers it."""
+    first = declare(gconn, "aria", [USER])
     r = declare(gconn, "aria", [USER], title="second")
+    assert r["ok"] is True
+    assert [(w["kind"], w["owner_plan_id"]) for w in r["warnings"]] == \
+        [("self-held", first["plan_id"])]
+
+
+def test_rescoping_onto_your_own_plan_is_quiet(gconn: sqlite3.Connection) -> None:
+    """Widening a plan onto ground IT already covers is a no-op, not an overlap: only
+    OTHER plans of the same agent warn `self-held` on rescope."""
+    p = declare(gconn, "aria", [USER])
+    with immediate(gconn):
+        r = claims.rescope(gconn, plan_id=p["plan_id"], add_targets=[USER], add_assumes=[],
+                           now=now_s())
     assert r["ok"] is True and r["warnings"] == []
+    other = declare(gconn, "aria", [LONELY])
+    with immediate(gconn):
+        r2 = claims.rescope(gconn, plan_id=other["plan_id"], add_targets=[USER],
+                            add_assumes=[], now=now_s())
+    assert r2["ok"] is True
+    assert [(w["kind"], w["owner_plan_id"]) for w in r2["warnings"]] == \
+        [("self-held", p["plan_id"])]
+
+
+def test_read_surfaces_expose_claim_origin(gconn: sqlite3.Connection) -> None:
+    """break4 cli-F1: origin decides authority DEPTH (BC3-1), so the read surfaces must
+    carry it — printed identically, `write svc.py::login` means subtree-covered when the
+    owner NAMED it but node-only when a CALLS hop swept it in, and the board would answer
+    the opposite of the gate one level down."""
+    a = declare(gconn, "aria", [AUTH])
+    swept = sorted(a["expanded_from"][nid(AUTH)])
+    origins = {r["node_id"]: r["origin"] for r in claims.active_claims(gconn, REPO, now_s())}
+    assert origins[nid(AUTH)] == "target"
+    assert all(origins[n] == "expanded" for n in swept)
+    plan = claims.get_plan(gconn, a["plan_id"])
+    assert plan["expanded_claims"] == [LOGIN, "util.py::hash_pw"]
+    assert set(plan["expanded_claims"]) < set(plan["write_claims"])
 
 
 def test_read_set_excludes_anything_already_write_claimed(gconn: sqlite3.Connection) -> None:

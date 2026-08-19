@@ -90,6 +90,12 @@ def discover_files(repo_root: str) -> list[str]:
     for dirpath, dirnames, filenames in os.walk(repo_root):
         dirnames[:] = sorted(d for d in dirnames if d not in EXCLUDE_DIRS)
         for f in filenames:
+            if f.startswith(".loom.sqlite3"):
+                # break4 cli-F2: the default db layout lives INSIDE the served checkout,
+                # and indexing loom's own database (plus its -wal/-shm, rewritten on every
+                # gate decision) kept `index_age` permanently stale. A --db under another
+                # name is the operator's own layout choice and is not special-cased.
+                continue
             full = os.path.join(dirpath, f)
             try:
                 if not os.path.isfile(full) or os.path.getsize(full) > _INDEX_CAP_BYTES:

@@ -63,8 +63,8 @@ def probe_payload(repo_root: str) -> dict:
             "tool_input": {"file_path": os.path.join(repo_root, _PROBE_REL), "content": ""}}
 
 
-def _die(msg: str, as_json: bool = False) -> NoReturn:
-    sys.stderr.write((json.dumps({"ok": False, "error": msg}) if as_json else f"loom: {msg}") + "\n")
+def _die(msg: str) -> NoReturn:
+    sys.stderr.write(f"loom: {msg}\n")
     raise SystemExit(1)
 
 
@@ -356,19 +356,23 @@ def _write_config(path: str, server: str, agent: str, repo: str, repo_root: str,
 
 
 def _ignore_identity(repo_root: str) -> bool:
-    """Idempotently gitignore the PER-USER identity file. Found live in the two-user
-    simulation: one user's `git add -A` committed their `loom.toml` into the shared
-    repo, and pulling it would silently re-identify every teammate as them."""
+    """Idempotently gitignore loom's per-checkout files. The PER-USER identity file: found
+    live in the two-user simulation — one user's `git add -A` committed their `loom.toml`
+    into the shared repo, and pulling it would silently re-identify every teammate as
+    them. The database (break4 cli-F2): the default layout puts `.loom.sqlite3*` inside
+    the served checkout, and committing a live WAL-mode database is never right."""
     path = os.path.join(repo_root, ".gitignore")
-    line = ".claude/loom.toml"
     existing = ""
     if os.path.exists(path):
         with open(path, encoding="utf-8") as fh:
             existing = fh.read()
-        if line in existing.splitlines():
-            return False
+    have = set(existing.splitlines())
+    missing = [ln for ln in (".claude/loom.toml", ".loom.sqlite3*") if ln not in have]
+    if not missing:
+        return False
     with open(path, "a", encoding="utf-8") as fh:
-        fh.write(("" if not existing or existing.endswith("\n") else "\n") + line + "\n")
+        fh.write(("" if not existing or existing.endswith("\n") else "\n")
+                 + "".join(ln + "\n" for ln in missing))
     return True
 
 
@@ -628,7 +632,8 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 def cmd_ls(args: argparse.Namespace) -> None:
     conn = connect(_existing_db_of(args))
     rows = conn.execute(
-        "SELECT c.node_id, c.mode, c.plan_id, p.agent, p.title, p.ttl_expires, n.path, n.qualname "
+        "SELECT c.node_id, c.mode, c.origin, c.plan_id, p.agent, p.title, p.ttl_expires, "
+        "n.path, n.qualname "
         "FROM claims c LEFT JOIN plans p ON p.id = c.plan_id LEFT JOIN nodes n ON n.id = c.node_id "
         f"WHERE {ACTIVE} ORDER BY p.updated DESC", (now_s(),)).fetchall()
     conn.close()
@@ -639,7 +644,10 @@ def cmd_ls(args: argparse.Namespace) -> None:
     if not (os.environ.get("CLAUDE_CODE") or os.environ.get("LOOM_AGENT_MODE") == "1"):
         print(f"{len(rows)} active claim(s)")
     for r in rows:
-        print(f"{r['mode']}\t{_ref(r)}\t{r['plan_id']}\t{r['agent']}\t{r['title']}"
+        # §11.40: an expansion-acquired claim covers its own node ONLY — printed the same
+        # as a named claim, the board would answer the opposite of the gate one level down.
+        mode = r["mode"] + (" (expanded)" if r["origin"] == "expanded" else "")
+        print(f"{mode}\t{_ref(r)}\t{r['plan_id']}\t{r['agent']}\t{r['title']}"
               f"\t{iso(r['ttl_expires'])}")
 
 
@@ -650,24 +658,30 @@ def cmd_show(args: argparse.Namespace) -> None:
         if plan is None:
             _die(f"unknown plan {args.id}")
         rows = conn.execute(
-            "SELECT c.mode, n.path, n.qualname FROM claims c LEFT JOIN nodes n ON n.id = c.node_id "
+            "SELECT c.mode, c.origin, n.path, n.qualname FROM claims c "
+            "LEFT JOIN nodes n ON n.id = c.node_id "
             "WHERE c.plan_id = ? AND c.released IS NULL", (args.id,)).fetchall()
         spec = plan["spec_md"]
         if len(spec) > 4000 and sys.stderr.isatty():
             sys.stderr.write("loom: spec truncated to 4000 chars\n")
         print(f"{plan['id']}  {plan['status']}  agent={plan['agent']}  repo={plan['repo']}\n"
               f"title: {plan['title']}\nexpires: {iso(plan['ttl_expires'])}\n"
-              + "".join(f"  {r['mode']:5s} {_ref(r)}\n" for r in rows) + f"\n{spec[:4000]}")
+              + "".join(f"  {r['mode']:5s} {_ref(r)}"
+                        + (" (expanded — this node only)" if r["origin"] == "expanded" else "")
+                        + "\n" for r in rows) + f"\n{spec[:4000]}")
     else:
         node = conn.execute("SELECT * FROM nodes WHERE id = ?", (args.id,)).fetchone()
         if node is None:
             _die(f"unknown node {args.id}")
         rows = conn.execute(
-            "SELECT c.mode, c.plan_id, p.agent FROM claims c LEFT JOIN plans p ON p.id = c.plan_id "
+            "SELECT c.mode, c.origin, c.plan_id, p.agent FROM claims c "
+            "LEFT JOIN plans p ON p.id = c.plan_id "
             f"WHERE c.node_id = ? AND {ACTIVE}", (args.id, now_s())).fetchall()
         print(f"{node['id']}  {node['kind']}  {_ref(node)}\n"
               f"lines {node['start_line']}-{node['end_line']}  updated {node['updated']}\n"
-              + "".join(f"  claimed {r['mode']} by {r['agent']} ({r['plan_id']})\n" for r in rows))
+              + "".join(f"  claimed {r['mode']} by {r['agent']} ({r['plan_id']}"
+                        + (", expanded — this node only" if r["origin"] == "expanded" else "")
+                        + ")\n" for r in rows))
     conn.close()
 
 

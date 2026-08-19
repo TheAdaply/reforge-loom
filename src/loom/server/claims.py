@@ -67,7 +67,7 @@ _PLACEHOLDERS = ("[short imperative title", "[your agent id", "[Two sentences",
 _ACTIVE_FROM = ("FROM claims c LEFT JOIN plans p ON p.id = c.plan_id "
                 "JOIN nodes n ON n.id = c.node_id ")
 _ACTIVE_WHERE = "c.released IS NULL AND p.status='active' AND p.ttl_expires > ? "
-_OWNER_COLS = ("SELECT c.node_id, c.mode, p.id AS pid, p.agent, p.title, p.spec_md, "
+_OWNER_COLS = ("SELECT c.node_id, c.mode, c.origin, p.id AS pid, p.agent, p.title, p.spec_md, "
                "p.ttl_expires, n.path, n.qualname ")
 
 
@@ -275,23 +275,6 @@ def contains_closure(conn: sqlite3.Connection, repo: str, node_ids: set[str],
     return seen
 
 
-def _scope_for_conflicts(conn: sqlite3.Connection, repo: str, ids: set[str]) -> set[str]:
-    """The nodes a claim on `ids` is judged against: ancestors of `ids`, plus what `ids` contain.
-
-    Deliberately the UNION of the two single-direction closures, never one mixed walk. A
-    mixed walk pivots up through a File node and then back down into that file's other
-    children, so declaring one function would put every sibling function into the conflict
-    question and loom would coordinate at file granularity. A sibling is not my business.
-
-    This is the same question `check_node` asks at gate time (which walks up only, because
-    the gate already knows the exact node being edited), so declare and enforce agree.
-    """
-    if not ids:
-        return set()
-    return (contains_closure(conn, repo, ids, down=False)
-            | contains_closure(conn, repo, ids, up=False))
-
-
 def find_conflicts(conn: sqlite3.Connection, repo: str, write_set: set[str], read_set: set[str],
                    own_plan_ids: set[str], now: float, *,
                    expanded: set[str] = frozenset()) -> list[dict[str, Any]]:
@@ -306,7 +289,8 @@ def find_conflicts(conn: sqlite3.Connection, repo: str, write_set: set[str], rea
     than the agent's own targets. Those scope UP ONLY: calling a class must contend with a
     claim on that class or its file, but must NOT down-explode into every method the agent
     never named — that residue re-created file-granular conflicts one hop out (council W2,
-    second half; the first half was the mixed-walk pivot fixed in `_scope_for_conflicts`).
+    second half; the first half was the mixed-walk pivot, §11 delta 26 — the closures here
+    are single-direction unions for that reason: a sibling is not my business).
 
     Contention is origin-aware, symmetric with `check_node`'s authority rule (BC3-1): a
     foreign claim sitting on an ANCESTOR of what I want conflicts only when its
@@ -337,8 +321,7 @@ def find_conflicts(conn: sqlite3.Connection, repo: str, write_set: set[str], rea
     for chunk in _chunks(sorted(wanted)):
         marks = ",".join("?" * len(chunk))
         rows += conn.execute(
-            _OWNER_COLS.replace("SELECT ", "SELECT c.origin, ")
-            + _ACTIVE_FROM + f"WHERE c.node_id IN ({marks}) AND " + _ACTIVE_WHERE
+            _OWNER_COLS + _ACTIVE_FROM + f"WHERE c.node_id IN ({marks}) AND " + _ACTIVE_WHERE
             + "AND p.repo=?", (*chunk, now, repo)).fetchall()
     out = []
     for r in rows:
@@ -346,8 +329,16 @@ def find_conflicts(conn: sqlite3.Connection, repo: str, write_set: set[str], rea
         if ancestor_only and r["origin"] != "target":
             continue  # a CALLS-hop container claim owns nothing below itself
         kind = f"{my_mode}-{r['mode']}"
-        if r["pid"] in own_plan_ids or kind == "read-read":
-            continue  # self-conflicts and shared^shared never conflict
+        if r["pid"] in own_plan_ids:
+            # RT-2: a silent skip minted duplicate plans on a node the agent ALREADY holds,
+            # then releasing the one plan the agent remembered left the siblings blocking
+            # everyone. Surface the overlap as an ADVISORY row — same shape, never blocking
+            # (`_intake` blocks on write-write only) — naming the plan that already covers it.
+            if kind == "write-write":
+                out.append(_conflict(r, "self-held"))
+            continue
+        if kind == "read-read":
+            continue  # shared^shared never conflicts
         out.append(_conflict(r, kind))
     return out
 
@@ -366,14 +357,33 @@ def _insert_claims(conn: sqlite3.Connection, plan_id: str, node_ids: set[str],
         [(n, plan_id, mode, origin, iso(now)) for n in sorted(node_ids)])
 
 
+def _write_claim_rows(conn: sqlite3.Connection, plan_id: str, write_set: set[str],
+                      read_set: set[str], expanded: dict[str, set[str]],
+                      now: float) -> set[str]:
+    """Materialize a plan's claim rows; returns the CALLS-swept subset.
+
+    BC3-1 authority model: a claim's ORIGIN bounds its authority. Named targets carry
+    full §4 container authority; nodes swept in by §5.3's CALLS hop authorize (and are
+    contended, see find_conflicts) on themselves only — calling a class is not owning it.
+    NOT `expanded.keys()`: expand_write_targets omits hop-less targets from the dict.
+    """
+    swept = {n for s in expanded.values() for n in s}
+    _insert_claims(conn, plan_id, write_set - swept, "write", now)
+    _insert_claims(conn, plan_id, swept, "write", now, origin="expanded")
+    _insert_claims(conn, plan_id, read_set, "read", now)
+    return swept
+
+
 def _intake(conn: sqlite3.Connection, repo: str, agent: str, targets: list[str],
-            assumes: list[str], now: float, errs: list[str],
-            why: str) -> tuple[dict[str, Any] | None, set[str], set[str],
-                               dict[str, set[str]], list[dict[str, Any]]]:
+            assumes: list[str], now: float, errs: list[str], why: str,
+            self_plan: str = "") -> tuple[dict[str, Any] | None, set[str], set[str],
+                                          dict[str, set[str]], list[dict[str, Any]]]:
     """Resolve -> expand -> judge, shared by declare and rescope.
 
     Returns `(refusal | None, write_set, read_set, expanded_from, warnings)`; a non-None
     refusal is the caller's whole all-or-nothing response and nothing has been claimed.
+    `self_plan` is the plan being rescoped: its own rows never warn `self-held` — widening
+    a plan onto ground it already covers is a no-op, not an overlap worth flagging.
     """
     wids, unresolved = _resolve_all(conn, repo, targets)
     rids, more = _resolve_all(conn, repo, assumes)
@@ -385,9 +395,10 @@ def _intake(conn: sqlite3.Connection, repo: str, agent: str, targets: list[str],
     expanded = expand_write_targets(conn, repo, set(wids))
     write_set = set(wids) | {n for s in expanded.values() for n in s}
     read_set = set(rids) - write_set
-    warnings = find_conflicts(conn, repo, write_set, read_set,
-                              _own_plan_ids(conn, repo, agent, now), now,
-                              expanded=write_set - set(wids))
+    warnings = [w for w in find_conflicts(conn, repo, write_set, read_set,
+                                          _own_plan_ids(conn, repo, agent, now), now,
+                                          expanded=write_set - set(wids))
+                if not (w["kind"] == "self-held" and w["owner_plan_id"] == self_plan)]
     if any(c["kind"] == "write-write" for c in warnings):
         log_event(conn, agent, "denied", f"{why} conflict", repo)
         return ({"ok": False, "reason": "conflict", "conflicts": warnings}, set(), set(), {}, [])
@@ -417,14 +428,7 @@ def declare_plan(conn: sqlite3.Connection, *, agent: str, repo: str, branch: str
         "INSERT INTO plans (id,agent,repo,branch,title,spec_md,status,created,updated,ttl_expires)"
         " VALUES (?,?,?,?,?,?,'active',?,?,?)",
         (plan_id, agent, repo, branch, title, spec_md, iso(now), iso(now), expires))
-    # BC3-1 authority model: a claim's ORIGIN bounds its authority. Named targets carry
-    # full §4 container authority; nodes swept in by §5.3's CALLS hop authorize (and are
-    # contended, see find_conflicts) on themselves only — calling a class is not owning it.
-    # NOT `expanded.keys()`: expand_write_targets omits hop-less targets from the dict.
-    swept = {n for s in expanded.values() for n in s}
-    _insert_claims(conn, plan_id, write_set - swept, "write", now)
-    _insert_claims(conn, plan_id, swept, "write", now, origin="expanded")
-    _insert_claims(conn, plan_id, read_set, "read", now)
+    _write_claim_rows(conn, plan_id, write_set, read_set, expanded, now)
     detail = plan_id + (f" ttl clamped to {TTL_FLOOR_S}s" if ttl_s and ttl_s < TTL_FLOOR_S
                         else f" ttl clamped to {TTL_CEIL_S}s" if ttl_s > TTL_CEIL_S else "")
     log_event(conn, agent, "declared", detail, repo)
@@ -443,13 +447,11 @@ def rescope(conn: sqlite3.Connection, *, plan_id: str, add_targets: list[str],
     if p["status"] != "active" or p["ttl_expires"] <= now:
         return {"ok": False, "reason": "not_active"}
     refusal, write_set, read_set, expanded, warnings = _intake(
-        conn, p["repo"], p["agent"], add_targets, add_assumes, now, [], "rescope")
+        conn, p["repo"], p["agent"], add_targets, add_assumes, now, [], "rescope",
+        self_plan=plan_id)
     if refusal:
         return refusal
-    swept = {n for s in expanded.values() for n in s}
-    _insert_claims(conn, plan_id, write_set - swept, "write", now)
-    _insert_claims(conn, plan_id, swept, "write", now, origin="expanded")
-    _insert_claims(conn, plan_id, read_set, "read", now)
+    swept = _write_claim_rows(conn, plan_id, write_set, read_set, expanded, now)
     # Naming a node the plan once held via a CALLS hop PROMOTES it to full authority —
     # the INSERT OR IGNORE above keeps the old 'expanded' row, so flip origin explicitly.
     conn.executemany(
@@ -526,11 +528,17 @@ def get_plan(conn: sqlite3.Connection, plan_id: str) -> dict[str, Any] | None:
         return None
     plan: dict[str, Any] = {k: p[k] for k in _PLAN_COLS}
     plan.update({"expires_ts": p["ttl_expires"], "expires_iso": iso(p["ttl_expires"]),
-                 "write_claims": [], "read_claims": []})
+                 "write_claims": [], "read_claims": [], "expanded_claims": []})
     for r in conn.execute(
-            "SELECT c.mode, n.path, n.qualname FROM claims c JOIN nodes n ON n.id=c.node_id "
+            "SELECT c.mode, c.origin, n.path, n.qualname FROM claims c "
+            "JOIN nodes n ON n.id=c.node_id "
             "WHERE c.plan_id=? AND c.released IS NULL ORDER BY n.path, n.qualname", (plan_id,)):
         plan[r["mode"] + "_claims"].append(node_ref(r["path"], r["qualname"]))
+        # Additive (§11.40): the write-mode refs the CALLS hop swept in — these authorize
+        # their own node only, and the board must be able to say so. Write-mode-only by
+        # construction: read claims are always minted origin='target'.
+        if r["origin"] == "expanded":
+            plan["expanded_claims"].append(node_ref(r["path"], r["qualname"]))
     return plan
 
 
@@ -539,8 +547,9 @@ def active_claims(conn: sqlite3.Connection, repo: str, now: float) -> list[dict[
     rows = conn.execute(_OWNER_COLS + _ACTIVE_FROM + "WHERE " + _ACTIVE_WHERE
                         + "AND p.repo=? ORDER BY n.path, n.qualname", (now, repo)).fetchall()
     return [{"node_id": r["node_id"], "ref": node_ref(r["path"], r["qualname"]), "mode": r["mode"],
-             "plan_id": r["pid"], "agent": r["agent"], "title": r["title"],
-             "expires_ts": r["ttl_expires"], "expires_iso": iso(r["ttl_expires"])} for r in rows]
+             "origin": r["origin"], "plan_id": r["pid"], "agent": r["agent"],
+             "title": r["title"], "expires_ts": r["ttl_expires"],
+             "expires_iso": iso(r["ttl_expires"])} for r in rows]
 
 
 def _decide(conn: sqlite3.Connection, repo: str, agent: str, decision: str, case: str,
@@ -561,7 +570,8 @@ def check_node(conn: sqlite3.Connection, *, repo: str, agent: str, node_id: str,
     carries authority over the contained node only when origin='target' — the agent NAMED
     the container. A container swept in by §5.3's CALLS hop authorizes nothing below
     itself, exactly as find_conflicts contends it with nothing below itself; the two sides
-    of the model agree again, which is what the strict-xfail fuzz case pinned.
+    of the model agree, pinned by `test_expansion_container_grants_no_downward_authority`
+    and the stateful fuzz machine's I1/I4 invariants.
     """
     scope = sorted(contains_closure(conn, repo, {node_id}, down=False))
     ancestors = [n for n in scope if n != node_id]

@@ -229,3 +229,13 @@ def test_index_repo_stats(graph) -> None:
     assert stats["nodes"] == len(EXPECTED_NODES)
     assert stats["edges"] == len(graph.raw_edges())
     assert sorted(stats["changed"]) == discover_files(graph.root)
+
+
+def test_looms_own_database_files_are_never_indexed(repo_root: str) -> None:
+    """break4 cli-F2: the default layout puts `.loom.sqlite3` INSIDE the served checkout;
+    indexing it (and its WAL, rewritten on every gate decision) kept `index_age`
+    permanently stale and minted meaningless File nodes."""
+    for f in (".loom.sqlite3", ".loom.sqlite3-wal", ".loom.sqlite3-shm"):
+        with open(os.path.join(repo_root, f), "w") as fh:
+            fh.write("x")
+    assert not [p for p in discover_files(repo_root) if ".loom.sqlite3" in p]
