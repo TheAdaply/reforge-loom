@@ -573,15 +573,19 @@ FIX-NOW items applied, 331 → 345 tests + 1 strict xfail) → simplification pa
 Cycle records: `scratchpad/break3/{CONFIRMED,fix-ledger,simplify-ledger}.md`. The items below are
 the design-needed remainders — no code for them landed in this cycle.
 
-- **BC3-1 (P0, top) — expansion-container downward authority (fuzz F1/F1b).** §5.3's CALLS hop
-  can expand a declared target into a claim on a *container* (Class/File) node; `find_conflicts`
-  contends expansion members up-only, but `check_node` judges over the up-closure of the edited
-  node — so two agents end up write-authorized on one node, order-dependently, and one CALLS hop
-  buys file-granular over-ownership. Pinned by the `xfail(strict=True)` case in
-  `tests/server/test_stateful_claims.py`: fixing it flips the marker to XPASS ("delete me"). Fix
-  needs design (mark expansion-acquired claims and deny their downward authority in `check_node`,
-  or contend expanded members over up∪down) without reintroducing the file-granular conflicts
-  council W2 removed.
+- **BC3-1 (P0, top) — expansion-container downward authority (fuzz F1/F1b). FIXED.** §5.3's
+  CALLS hop could expand a declared target into a claim on a *container* (Class/File) node that
+  authorized every child in `check_node` without ever contending for them — two agents
+  write-authorized on one node, order-dependently. Fix is the **origin authority model**: claims
+  carry `origin` ('target' | 'expanded'; guarded migration in `db.py`), expansion-acquired
+  container claims neither authorize downward (`check_node` requires `origin='target'` on
+  ancestor claims) nor get contended downward-from-ancestors (`find_conflicts` skips
+  ancestor-only rows with `origin!='target'`), and a rescope that NAMES a previously-swept node
+  promotes its row to 'target'. The one-time xfail pin is now the passing
+  `test_expansion_container_grants_no_downward_authority`, and the Hypothesis machine's oracle
+  runs the law as written unconditionally (the `LOOM_FUZZ_STRICT` knob is gone). File-granular
+  conflicts stay out (council W2 preserved: named targets still contend up∪down; swept nodes
+  exact+up only).
 - **BC3-2 — index concurrency (chaos F1).** `loom index` holds one `BEGIN IMMEDIATE` for the
   whole rebuild; gate audit/renew writes block past the hook's 1.5 s budget and fail OPEN across
   every repo the server's database serves. This cycle landed only the operator stderr warning;

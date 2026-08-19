@@ -307,24 +307,45 @@ def find_conflicts(conn: sqlite3.Connection, repo: str, write_set: set[str], rea
     claim on that class or its file, but must NOT down-explode into every method the agent
     never named — that residue re-created file-granular conflicts one hop out (council W2,
     second half; the first half was the mixed-walk pivot fixed in `_scope_for_conflicts`).
+
+    Contention is origin-aware, symmetric with `check_node`'s authority rule (BC3-1): a
+    foreign claim sitting on an ANCESTOR of what I want conflicts only when its
+    origin='target' (the owner NAMED that container). A container claim minted by
+    someone's CALLS hop grants them nothing below it, so it blocks nothing below it.
     """
     explicit = write_set - expanded
-    w = _scope_for_conflicts(conn, repo, explicit) \
-        | contains_closure(conn, repo, set(expanded) & write_set, down=False)
-    r = _scope_for_conflicts(conn, repo, read_set)
-    wanted = {n: "write" for n in w}
-    wanted.update({n: "read" for n in r if n not in w})
+    exact = set(write_set)
+    down = contains_closure(conn, repo, explicit, up=False) - exact
+    up = (contains_closure(conn, repo, explicit, down=False)
+          | contains_closure(conn, repo, set(expanded) & write_set, down=False)) - exact - down
+    r_exact = set(read_set)
+    r_down = contains_closure(conn, repo, r_exact, up=False) - r_exact
+    r_up = contains_closure(conn, repo, r_exact, down=False) - r_exact - r_down
+    # node -> (my mode, ancestor_only): ancestor_only rows count iff their origin='target'.
+    wanted: dict[str, tuple[str, bool]] = {}
+    for n in exact | down:
+        wanted[n] = ("write", False)
+    for n in up:
+        wanted.setdefault(n, ("write", True))
+    for n in r_exact | r_down:
+        wanted.setdefault(n, ("read", False))
+    for n in r_up:
+        wanted.setdefault(n, ("read", True))
     if not wanted:
         return []
     rows: list[sqlite3.Row] = []
     for chunk in _chunks(sorted(wanted)):
         marks = ",".join("?" * len(chunk))
         rows += conn.execute(
-            _OWNER_COLS + _ACTIVE_FROM + f"WHERE c.node_id IN ({marks}) AND " + _ACTIVE_WHERE
+            _OWNER_COLS.replace("SELECT ", "SELECT c.origin, ")
+            + _ACTIVE_FROM + f"WHERE c.node_id IN ({marks}) AND " + _ACTIVE_WHERE
             + "AND p.repo=?", (*chunk, now, repo)).fetchall()
     out = []
     for r in rows:
-        kind = f"{wanted[r['node_id']]}-{r['mode']}"
+        my_mode, ancestor_only = wanted[r["node_id"]]
+        if ancestor_only and r["origin"] != "target":
+            continue  # a CALLS-hop container claim owns nothing below itself
+        kind = f"{my_mode}-{r['mode']}"
         if r["pid"] in own_plan_ids or kind == "read-read":
             continue  # self-conflicts and shared^shared never conflict
         out.append(_conflict(r, kind))
@@ -338,10 +359,11 @@ def _own_plan_ids(conn: sqlite3.Connection, repo: str, agent: str, now: float) -
 
 
 def _insert_claims(conn: sqlite3.Connection, plan_id: str, node_ids: set[str],
-                   mode: str, now: float) -> None:
+                   mode: str, now: float, origin: str = "target") -> None:
     conn.executemany(
-        "INSERT OR IGNORE INTO claims (node_id, plan_id, mode, created) VALUES (?,?,?,?)",
-        [(n, plan_id, mode, iso(now)) for n in sorted(node_ids)])
+        "INSERT OR IGNORE INTO claims (node_id, plan_id, mode, origin, created)"
+        " VALUES (?,?,?,?,?)",
+        [(n, plan_id, mode, origin, iso(now)) for n in sorted(node_ids)])
 
 
 def _intake(conn: sqlite3.Connection, repo: str, agent: str, targets: list[str],
@@ -395,7 +417,13 @@ def declare_plan(conn: sqlite3.Connection, *, agent: str, repo: str, branch: str
         "INSERT INTO plans (id,agent,repo,branch,title,spec_md,status,created,updated,ttl_expires)"
         " VALUES (?,?,?,?,?,?,'active',?,?,?)",
         (plan_id, agent, repo, branch, title, spec_md, iso(now), iso(now), expires))
-    _insert_claims(conn, plan_id, write_set, "write", now)
+    # BC3-1 authority model: a claim's ORIGIN bounds its authority. Named targets carry
+    # full §4 container authority; nodes swept in by §5.3's CALLS hop authorize (and are
+    # contended, see find_conflicts) on themselves only — calling a class is not owning it.
+    # NOT `expanded.keys()`: expand_write_targets omits hop-less targets from the dict.
+    swept = {n for s in expanded.values() for n in s}
+    _insert_claims(conn, plan_id, write_set - swept, "write", now)
+    _insert_claims(conn, plan_id, swept, "write", now, origin="expanded")
     _insert_claims(conn, plan_id, read_set, "read", now)
     detail = plan_id + (f" ttl clamped to {TTL_FLOOR_S}s" if ttl_s and ttl_s < TTL_FLOOR_S
                         else f" ttl clamped to {TTL_CEIL_S}s" if ttl_s > TTL_CEIL_S else "")
@@ -418,8 +446,15 @@ def rescope(conn: sqlite3.Connection, *, plan_id: str, add_targets: list[str],
         conn, p["repo"], p["agent"], add_targets, add_assumes, now, [], "rescope")
     if refusal:
         return refusal
-    _insert_claims(conn, plan_id, write_set, "write", now)
+    swept = {n for s in expanded.values() for n in s}
+    _insert_claims(conn, plan_id, write_set - swept, "write", now)
+    _insert_claims(conn, plan_id, swept, "write", now, origin="expanded")
     _insert_claims(conn, plan_id, read_set, "read", now)
+    # Naming a node the plan once held via a CALLS hop PROMOTES it to full authority —
+    # the INSERT OR IGNORE above keeps the old 'expanded' row, so flip origin explicitly.
+    conn.executemany(
+        "UPDATE claims SET origin='target' WHERE plan_id=? AND node_id=? AND mode='write'",
+        [(plan_id, n) for n in sorted(write_set - swept)])
     expires = max(p["ttl_expires"], now + CLAIM_TTL_S)
     conn.execute("UPDATE plans SET ttl_expires=?, updated=? WHERE id=?",
                  (expires, iso(now), plan_id))
@@ -521,16 +556,24 @@ def check_node(conn: sqlite3.Connection, *, repo: str, agent: str, node_id: str,
                now: float) -> dict[str, Any]:
     """§6 steps 3-6 on an already-resolved node. Plain reads; never wrap in a transaction.
 
-    Judged over the node AND its CONTAINS ancestors (§4): a write claim on the containing
-    File/Class covers every symbol inside it — so its owner is allowed on their own file,
-    and a foreign container claim blocks the symbol edit instead of silently clearing it.
+    Judged over the node AND its CONTAINS ancestors (§4), with BC3-1's authority rule: a
+    claim on the node itself counts whatever its origin, but an ANCESTOR (File/Class) claim
+    carries authority over the contained node only when origin='target' — the agent NAMED
+    the container. A container swept in by §5.3's CALLS hop authorizes nothing below
+    itself, exactly as find_conflicts contends it with nothing below itself; the two sides
+    of the model agree again, which is what the strict-xfail fuzz case pinned.
     """
     scope = sorted(contains_closure(conn, repo, {node_id}, down=False))
-    marks = ",".join("?" * len(scope))
+    ancestors = [n for n in scope if n != node_id]
+    a_marks = ",".join("?" * len(ancestors))
+    node_pred = ("(c.node_id=?" +
+                 (f" OR (c.node_id IN ({a_marks}) AND c.origin='target')" if ancestors else "")
+                 + ") ")
+    scope_params = (node_id, *ancestors)
     mine = conn.execute(
-        "SELECT p.id AS pid " + _ACTIVE_FROM + f"WHERE c.node_id IN ({marks}) AND "
+        "SELECT p.id AS pid " + _ACTIVE_FROM + "WHERE " + node_pred + "AND "
         "c.mode='write' AND " + _ACTIVE_WHERE + "AND p.agent=? AND p.repo=? "
-        "ORDER BY p.updated DESC LIMIT 1", (*scope, now, agent, repo)).fetchone()
+        "ORDER BY p.updated DESC LIMIT 1", (*scope_params, now, agent, repo)).fetchone()
     if mine:
         # Implicit renew of the matched plan; the judge lives in the WHERE, so no tx.
         conn.execute("UPDATE plans SET ttl_expires=MAX(ttl_expires, ?), updated=? "
@@ -538,9 +581,9 @@ def check_node(conn: sqlite3.Connection, *, repo: str, agent: str, node_id: str,
                      (now + CLAIM_TTL_S, iso(now), mine["pid"], now))
         return _decide(conn, repo, agent, "allow", "in_plan", "", node_id, mine["pid"])
     foreign = conn.execute(
-        _OWNER_COLS + _ACTIVE_FROM + f"WHERE c.node_id IN ({marks}) AND c.mode='write' AND "
+        _OWNER_COLS + _ACTIVE_FROM + "WHERE " + node_pred + "AND c.mode='write' AND "
         + _ACTIVE_WHERE + "AND p.agent<>? AND p.repo=? ORDER BY p.ttl_expires DESC LIMIT 1",
-        (*scope, now, agent, repo)).fetchone()
+        (*scope_params, now, agent, repo)).fetchone()
     if foreign:
         owner = _conflict(foreign, "write-write")
         return _decide(conn, repo, agent, "deny", "foreign_claim",

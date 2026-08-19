@@ -191,7 +191,8 @@ def seeded_db(tmp_path: Path) -> str:
          "active", stamp, stamp, now_s() + 1800),
     )
     conn.execute(
-        "INSERT INTO claims VALUES (?,?,?,?,?)", ("n-node0001", "lm-9c1x", "write", stamp, None)
+        "INSERT INTO claims (node_id, plan_id, mode, created, released) VALUES (?,?,?,?,?)",
+        ("n-node0001", "lm-9c1x", "write", stamp, None),
     )
     conn.close()
     return db

@@ -17,14 +17,12 @@ These are INDEPENDENT cross-checks, not self-validation: `_owners` recomputes au
 the raw `claims`/`plans` rows against a precomputed static CONTAINS up-closure, so I1 and I4
 can disagree with `check_node` — and do.
 
-I1 has two modes. `strict` is the law as written in the README ("Overlapping plans are
-refused at declare time ... so the merge conflict never gets written"). It FAILS on a known
-defect: a §5.3 CALLS-hop expansion can claim a *container* (Class) node without ever
-contending for that container's children, yet `check_node` grants authority downward from
-any container claim — so two agents end up allowed on one method. See
-`test_known_defect_expansion_container_grants_uncontended_authority` below, which pins the
-minimal case. The default mode quarantines exactly that residue so the machine can keep
-looking for other defects; set LOOM_FUZZ_STRICT=1 to run the law as written.
+I1 is the law as written in the README ("Overlapping plans are refused at declare time ...
+so the merge conflict never gets written"), and it holds unconditionally since the BC3-1
+authority model: a §5.3 CALLS-hop expansion claims a *container* (Class) node with
+`origin='expanded'`, which authorizes and contends on that node only — never downward.
+`test_expansion_container_grants_no_downward_authority` below pins the once-minimal
+counterexample.
 
 CI budget is deliberately small — 50 examples x 40 steps, well under a second — because this
 is a regression NET, not the search. `LOOM_FUZZ_EXAMPLES` raises it, capped at 200 so no
@@ -32,7 +30,6 @@ configuration can turn the suite into a fuzzing run; the long searches (2500 exa
 in a scratch harness, not in `pytest tests`.
 
     LOOM_FUZZ_EXAMPLES=200 uv run --directory <loom> pytest tests/server/test_stateful_claims.py
-    LOOM_FUZZ_STRICT=1 ...      # I1 as the README states it — fails today, see the xfail below
 """
 
 from __future__ import annotations
@@ -56,7 +53,6 @@ from loom.server.ids import node_ref
 REPO = "fx"
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "pyrepo"
 AGENTS = ["alice", "bob", "carol"]
-STRICT = os.environ.get("LOOM_FUZZ_STRICT") == "1"
 
 SPEC = """# Spec: cache authenticate
 
@@ -163,14 +159,17 @@ class ClaimLifecycle(RuleBasedStateMachine):
             "WHERE c.released IS NULL AND c.mode='write' AND p.status='active' "
             "AND p.ttl_expires > ? AND p.repo=?", (self.now, REPO))]
 
-    def _owners(self, node_id: str, *, strict: bool = True) -> set[str]:
-        """Agents that effectively hold write authority over `node_id` right now."""
+    def _owners(self, node_id: str) -> set[str]:
+        """Agents that effectively hold write authority over `node_id` right now (BC3-1):
+        a claim on the node itself always counts; a claim on an ANCESTOR counts only when
+        it was a NAMED target — expansion-acquired container claims grant nothing below
+        themselves. What used to be the non-strict quarantine IS the semantics now."""
         out = set()
         for nid, pid, agent in self._active_write_rows():
             if nid not in UP[node_id]:
                 continue
-            if not strict and nid != node_id and (pid, nid) in self.expansion:
-                continue          # quarantined: the known expansion/container defect
+            if nid != node_id and (pid, nid) in self.expansion:
+                continue          # BC3-1: expansion container claims own nothing below
             out.add(agent)
         return out
 
@@ -191,9 +190,11 @@ class ClaimLifecycle(RuleBasedStateMachine):
         if pid not in self.plans:
             self.order.append(pid)
         self.plans[pid] = agent
-        for members in res.get("expanded_from", {}).values():
-            for nid in members:
-                self.expansion.add((pid, nid))
+        members = {nid for ms in res.get("expanded_from", {}).values() for nid in ms}
+        for nid in members:
+            self.expansion.add((pid, nid))
+        for nid in set(res.get("claimed_write", ())) - members:
+            self.expansion.discard((pid, nid))    # BC3-1: naming a swept node promotes it
 
     def _check_deny(self, d: dict) -> None:
         # I3 — a deny must name an active plan, or name none at all (`no_plan`).
@@ -281,7 +282,7 @@ class ClaimLifecycle(RuleBasedStateMachine):
     @rule(agent=agents, ref=refs)
     def check(self, agent, ref):
         nid = REF_TO_ID[ref]
-        owners_before = self._owners(nid, strict=True)
+        owners_before = self._owners(nid)
         d = C.check_node(self.conn, repo=REPO, agent=agent, node_id=nid, now=self.now)
         self.log.append(f"check({agent!r},{ref!r}) -> {d['decision']}/{d['case']}")
         self._check_deny(d)
@@ -306,7 +307,7 @@ class ClaimLifecycle(RuleBasedStateMachine):
     @invariant()
     def one_writer_per_node(self):
         for nid, ref in ID_TO_REF.items():
-            owners = self._owners(nid, strict=STRICT)
+            owners = self._owners(nid)
             assert len(owners) <= 1, \
                 f"I1 {ref} is writable by {sorted(owners)} simultaneously"
 
@@ -337,11 +338,7 @@ ClaimLifecycle.TestCase.settings = settings(
 TestClaimLifecycle = ClaimLifecycle.TestCase
 
 
-@pytest.mark.xfail(reason="known defect: a CALLS-hop expansion claim on a container grants "
-                          "uncontended write authority over every node it contains "
-                          "(break3 fuzz-F1, BACKLOG — the fix changes the authority model)",
-                   strict=True)
-def test_known_defect_expansion_container_grants_uncontended_authority():
+def test_expansion_container_grants_no_downward_authority():
     """alice and bob declare two different helpers; both end up owning one method.
 
     Deliberately asserts ONLY the invariant, never that either declare is granted, so it

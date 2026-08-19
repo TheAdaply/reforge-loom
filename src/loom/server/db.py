@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS claims (
   node_id  TEXT NOT NULL,
   plan_id  TEXT NOT NULL,
   mode     TEXT NOT NULL,                    -- 'write' | 'read'
+  origin   TEXT NOT NULL DEFAULT 'target',   -- 'target' | 'expanded' (BC3-1 authority model)
   created  TEXT NOT NULL,
   released TEXT,                             -- tombstone, never DELETE (agent-mail §2.1)
   PRIMARY KEY (node_id, plan_id, mode)
@@ -88,7 +89,13 @@ CREATE TABLE IF NOT EXISTS events (
 # at once. `nodes`/`plans` were repo-keyed from day one; `events` is the one table that
 # was not, so it is the one table that needs a migration. Guarded by PRAGMA table_info so
 # it is idempotent and so a fresh db (which gets the column from the DDL above) skips it.
-MIGRATIONS = (("events", "repo", "ALTER TABLE events ADD COLUMN repo TEXT NOT NULL DEFAULT ''"),)
+MIGRATIONS = (
+    ("events", "repo", "ALTER TABLE events ADD COLUMN repo TEXT NOT NULL DEFAULT ''"),
+    # BC3-1: how a claim was acquired decides how much authority it grants. 'target' =
+    # the agent named this node; 'expanded' = §5.3's CALLS hop swept it in. Pre-migration
+    # rows default to 'target' — the generous reading, correct for old single-writer dbs.
+    ("claims", "origin", "ALTER TABLE claims ADD COLUMN origin TEXT NOT NULL DEFAULT 'target'"),
+)
 
 
 def connect(db_path: str) -> sqlite3.Connection:
